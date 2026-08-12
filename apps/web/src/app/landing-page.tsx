@@ -8,8 +8,8 @@ export function LandingPage() {
           </span>
           <span>Контур</span>
         </a>
-        <a className="admin-link" href="/backoffice/">
-          Войти в управление
+          <a className="admin-link" href="/vendor/">
+            Кабинет вендора
           <span aria-hidden="true">↗</span>
         </a>
       </header>
@@ -22,13 +22,12 @@ export function LandingPage() {
             Пространство для учебных материалов и последовательного обучения.
             Сейчас мы настраиваем основу платформы.
           </p>
-          <a className="primary-action" href="/backoffice/">
-            Перейти в панель управления
+          <a className="primary-action" href="/vendor/">
+            Открыть кабинет вендора
             <span aria-hidden="true">→</span>
           </a>
           <p className="route-note">
-            Панель администратора расположена по адресу{' '}
-            <code>/backoffice/</code>
+            Платформа администратора доступна только через <code>/backoffice/</code>
           </p>
         </div>
 

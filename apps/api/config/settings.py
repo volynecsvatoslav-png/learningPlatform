@@ -32,6 +32,7 @@ ALLOWED_HOSTS = [
     host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",") if host
 ]
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173").rstrip("/")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -45,6 +46,8 @@ INSTALLED_APPS = [
     "vendors",
     "media_assets",
     "learning",
+    "learner",
+    "vendor_api",
 ]
 
 MIDDLEWARE = [
@@ -147,6 +150,7 @@ SESSION_COOKIE_NAME = "__Host-backoffice_session" if SESSION_COOKIE_SECURE else 
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_PATH = "/"
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 8)))
 CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
@@ -169,3 +173,6 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
 }
+
+VENDOR_AUTH_RATE_LIMIT = int(os.getenv("VENDOR_AUTH_RATE_LIMIT", "8"))
+VENDOR_AUTH_RATE_WINDOW_SECONDS = int(os.getenv("VENDOR_AUTH_RATE_WINDOW_SECONDS", "300"))

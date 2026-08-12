@@ -4,7 +4,32 @@ from django.urls import path, reverse_lazy
 from accounts.admin import backoffice_site
 from accounts.forms import BackofficePasswordResetForm
 from config.health import health
-from media_assets.views import MediaStatusView, StreamURLView, UploadCompleteView, UploadCreateView
+from learner.views import AccessLinkView, LearnerSessionView
+from media_assets.views import (
+    MediaStatusView,
+    StreamURLView,
+    UploadCompleteView,
+    UploadCreateView,
+)
+from vendor_api.views import (
+    VendorAccessGrantView,
+    VendorAccessListView,
+    VendorAccessReissueView,
+    VendorAccessRevokeView,
+    VendorAuthView,
+    VendorCourseDetailView,
+    VendorCourseListView,
+    VendorCoursePreviewView,
+    VendorCoursePublishView,
+    VendorCourseStructureView,
+    VendorCsrfView,
+    VendorLogoutView,
+    VendorMemberDetailView,
+    VendorMemberListView,
+    VendorMeView,
+    VendorPasswordResetConfirmView,
+    VendorPasswordResetRequestView,
+)
 
 urlpatterns = [
     path("health/", health, name="health"),
@@ -24,6 +49,80 @@ urlpatterns = [
         StreamURLView.as_view(),
         name="media-stream-url",
     ),
+    path("api/v1/vendor/csrf", VendorCsrfView.as_view(), name="vendor-csrf"),
+    path("api/v1/vendor/auth/login", VendorAuthView.as_view(), name="vendor-login"),
+    path("api/v1/vendor/auth/logout", VendorLogoutView.as_view(), name="vendor-logout"),
+    path(
+        "api/v1/vendor/auth/password-reset",
+        VendorPasswordResetRequestView.as_view(),
+        name="vendor-password-reset",
+    ),
+    path(
+        "api/v1/vendor/auth/password-reset/<uidb64>/<token>",
+        VendorPasswordResetConfirmView.as_view(),
+        name="vendor-password-reset-confirm",
+    ),
+    path("api/v1/vendor/me", VendorMeView.as_view(), name="vendor-me"),
+    path("api/v1/vendor/courses", VendorCourseListView.as_view(), name="vendor-courses"),
+    path(
+        "api/v1/vendor/courses/<uuid:course_id>",
+        VendorCourseDetailView.as_view(),
+        name="vendor-course",
+    ),
+    path(
+        "api/v1/vendor/courses/<uuid:course_id>/publish",
+        VendorCoursePublishView.as_view(),
+        name="vendor-course-publish",
+    ),
+    path(
+        "api/v1/vendor/courses/<uuid:course_id>/preview",
+        VendorCoursePreviewView.as_view(),
+        name="vendor-course-preview",
+    ),
+    path(
+        "api/v1/vendor/courses/<uuid:course_id>/structure",
+        VendorCourseStructureView.as_view(),
+        name="vendor-course-structure",
+    ),
+    path("api/v1/vendor/access", VendorAccessListView.as_view(), name="vendor-access-list"),
+    path(
+        "api/v1/vendor/access/grant",
+        VendorAccessGrantView.as_view(),
+        name="vendor-access-grant",
+    ),
+    path(
+        "api/v1/vendor/access/<uuid:enrollment_id>/revoke",
+        VendorAccessRevokeView.as_view(),
+        name="vendor-access-revoke",
+    ),
+    path(
+        "api/v1/vendor/access/<uuid:enrollment_id>/reissue",
+        VendorAccessReissueView.as_view(),
+        name="vendor-access-reissue",
+    ),
+    path("api/v1/vendor/members", VendorMemberListView.as_view(), name="vendor-members"),
+    path(
+        "api/v1/vendor/members/<uuid:member_id>",
+        VendorMemberDetailView.as_view(),
+        name="vendor-member",
+    ),
+    path(
+        "api/v1/vendor/media/uploads",
+        UploadCreateView.as_view(),
+        name="vendor-media-upload-create",
+    ),
+    path(
+        "api/v1/vendor/media/<uuid:asset_id>/complete",
+        UploadCompleteView.as_view(),
+        name="vendor-media-upload-complete",
+    ),
+    path(
+        "api/v1/vendor/media/<uuid:asset_id>",
+        MediaStatusView.as_view(),
+        name="vendor-media-status",
+    ),
+    path("api/v1/learner/access/<str:token>", AccessLinkView.as_view(), name="learner-access"),
+    path("api/v1/learner/session", LearnerSessionView.as_view(), name="learner-session"),
     path(
         "backoffice/password_reset/",
         auth_views.PasswordResetView.as_view(

@@ -31,7 +31,7 @@ def make_course(vendor: Vendor) -> tuple[Course, Module, Lesson, ContentUnit]:
     return course, module, lesson, unit
 
 
-def test_editor_sees_only_own_learning_tree_and_direct_foreign_url_is_404(client: Client) -> None:
+def test_editor_sees_only_own_learning_tree_and_cannot_open_backoffice(client: Client) -> None:
     alpha = Vendor.objects.create(name="Alpha", slug="alpha")
     beta = Vendor.objects.create(name="Beta", slug="beta")
     editor = make_editor("editor@example.com", alpha)
@@ -48,9 +48,14 @@ def test_editor_sees_only_own_learning_tree_and_direct_foreign_url_is_404(client
     ]
     client.force_login(editor)
     response = client.get(f"/backoffice/learning/course/{beta_tree[0].pk}/change/")
-    assert response.status_code == 404
-    response = client.get(f"/backoffice/learning/course/{beta_tree[0].pk}/delete/")
-    assert response.status_code == 404
+    assert response.status_code == 302
+
+
+def test_only_superuser_can_open_backoffice(client: Client) -> None:
+    admin = User.objects.create_superuser("admin@example.com", PASSWORD)
+    client.force_login(admin)
+
+    assert client.get("/backoffice/").status_code == 200
 
 
 def test_platform_superuser_sees_all_courses() -> None:

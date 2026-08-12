@@ -19,10 +19,7 @@ class BackofficeAdminSite(admin.AdminSite):
             return False
         if user.is_superuser:
             return True
-        return bool(
-            getattr(user, "email_verified_at", None)
-            and user.vendor_memberships.filter(vendor__status="active").exists()
-        )
+        return False
 
 
 backoffice_site = BackofficeAdminSite(name="backoffice")

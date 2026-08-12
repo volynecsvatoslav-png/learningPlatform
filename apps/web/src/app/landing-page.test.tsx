@@ -22,9 +22,10 @@ describe('LandingPage', () => {
         name: 'Знания, собранные в ясный маршрут.',
       }),
     ).toBeInTheDocument()
-    expect(
-      screen.getByRole('link', { name: /перейти в панель управления/i }),
-    ).toHaveAttribute('href', '/backoffice/')
+    expect(screen.getByRole('link', { name: /открыть кабинет вендора/i })).toHaveAttribute(
+      'href',
+      '/vendor/',
+    )
     expect(screen.queryByText(/скачать курс/i)).not.toBeInTheDocument()
   })
 })

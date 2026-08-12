@@ -36,7 +36,7 @@ py-modules = []
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings_test"
 python_files = ["test_*.py"]
-testpaths = ["accounts/tests", "vendors/tests", "learning/tests", "media_assets/tests"]
+testpaths = ["accounts/tests", "vendors/tests", "learning/tests", "media_assets/tests", "learner/tests", "vendor_api/tests"]
 addopts = "--strict-config --strict-markers"
 
 [tool.ruff]
