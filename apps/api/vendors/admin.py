@@ -16,6 +16,8 @@ class VendorAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[Vendor]:
         queryset = super().get_queryset(request)
+        if isinstance(request.user, AnonymousUser):
+            return queryset.none()
         if request.user.is_superuser:
             return queryset
         return queryset.filter(members__user=request.user)
@@ -46,6 +48,8 @@ class VendorMemberAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[VendorMember]:
         queryset = super().get_queryset(request).select_related("user", "vendor")
+        if isinstance(request.user, AnonymousUser):
+            return queryset.none()
         if request.user.is_superuser:
             return queryset
         return queryset.filter(vendor__members__user=request.user).distinct()

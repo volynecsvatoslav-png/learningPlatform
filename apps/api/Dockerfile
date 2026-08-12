@@ -5,11 +5,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN addgroup --system django && adduser --system --ingroup django django
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system django \
+    && adduser --system --ingroup django django
 COPY requirements.lock ./
 RUN pip install --no-cache-dir --requirement requirements.lock
 
 COPY --chown=django:django . .
+RUN chown -R django:django /app
 RUN chmod +x /app/entrypoint.sh
 USER django
 

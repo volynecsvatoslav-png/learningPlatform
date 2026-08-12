@@ -55,6 +55,8 @@ class BackofficeUserAdmin(UserAdmin):  # type: ignore[type-arg]
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[User]:
         queryset = super().get_queryset(request)
+        if isinstance(request.user, AnonymousUser):
+            return queryset.none()
         if request.user.is_superuser:
             return queryset
         return queryset.filter(vendor_memberships__vendor__members__user=request.user).distinct()

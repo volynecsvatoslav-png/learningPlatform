@@ -1,9 +1,10 @@
 import pytest
+from django.contrib.auth.models import AnonymousUser
 from django.http import Http404, HttpRequest
 from django.test import Client
 from django.utils import timezone
 
-from accounts.admin import backoffice_site
+from accounts.admin import BackofficeUserAdmin, backoffice_site
 from accounts.models import User
 from vendors.admin import VendorAdmin, VendorMemberAdmin
 from vendors.models import Vendor, VendorMember
@@ -52,3 +53,27 @@ def test_two_owners_only_see_their_members_and_cross_tenant_url_is_denied(client
     client.force_login(alpha_owner)
     response = client.get(f"/backoffice/vendors/vendormember/{beta_membership.pk}/change/")
     assert response.status_code in {302, 403, 404}
+
+
+def test_anonymous_module_permissions_do_not_crash(client: Client) -> None:
+    request = HttpRequest()
+    request.user = AnonymousUser()
+    vendor_admin = VendorAdmin(Vendor, backoffice_site)
+    member_admin = VendorMemberAdmin(VendorMember, backoffice_site)
+    user_admin = BackofficeUserAdmin(User, backoffice_site)
+
+    assert not vendor_admin.has_module_permission(request)
+    assert not vendor_admin.has_view_permission(request)
+    assert not vendor_admin.has_add_permission(request)
+    assert not vendor_admin.has_change_permission(request)
+    assert not vendor_admin.has_delete_permission(request)
+    assert not member_admin.has_module_permission(request)
+    assert not member_admin.has_view_permission(request)
+    assert not member_admin.has_add_permission(request)
+    assert not member_admin.has_change_permission(request)
+    assert not member_admin.has_delete_permission(request)
+    assert not user_admin.has_module_permission(request)
+    assert not user_admin.has_view_permission(request)
+
+    response = client.get("/backoffice/login/")
+    assert response.status_code == 200

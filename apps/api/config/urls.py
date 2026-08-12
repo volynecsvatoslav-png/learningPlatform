@@ -4,9 +4,26 @@ from django.urls import path, reverse_lazy
 from accounts.admin import backoffice_site
 from accounts.forms import BackofficePasswordResetForm
 from config.health import health
+from media_assets.views import MediaStatusView, StreamURLView, UploadCompleteView, UploadCreateView
 
 urlpatterns = [
     path("health/", health, name="health"),
+    path("api/v1/backoffice/media/uploads", UploadCreateView.as_view(), name="media-upload-create"),
+    path(
+        "api/v1/backoffice/media/<uuid:asset_id>/complete",
+        UploadCompleteView.as_view(),
+        name="media-upload-complete",
+    ),
+    path(
+        "api/v1/backoffice/media/<uuid:asset_id>",
+        MediaStatusView.as_view(),
+        name="media-status",
+    ),
+    path(
+        "api/v1/media/<uuid:asset_id>/stream-url",
+        StreamURLView.as_view(),
+        name="media-stream-url",
+    ),
     path(
         "backoffice/password_reset/",
         auth_views.PasswordResetView.as_view(

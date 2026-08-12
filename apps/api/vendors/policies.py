@@ -1,13 +1,16 @@
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
+from django.db import models
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 
 from accounts.models import User
-from vendors.models import TenantQuerySet, Vendor, VendorMember
+from vendors.models import Vendor, VendorMember
+
+ModelT = TypeVar("ModelT", bound=models.Model)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +41,12 @@ class VendorContext:
             raise Http404
         return cls(vendor=vendor, membership=membership)
 
-    def scope(self, queryset: TenantQuerySet) -> TenantQuerySet:
-        return queryset.for_vendor(self.vendor.id)
+    def scope(
+        self, queryset: models.Manager[ModelT] | models.QuerySet[ModelT]
+    ) -> models.QuerySet[ModelT]:
+        return queryset.filter(vendor_id=self.vendor.id)
 
-    def get_object_or_404(self, queryset: TenantQuerySet, **lookup: Any) -> Any:
+    def get_object_or_404(
+        self, queryset: models.Manager[ModelT] | models.QuerySet[ModelT], **lookup: Any
+    ) -> ModelT:
         return get_object_or_404(self.scope(queryset), **lookup)

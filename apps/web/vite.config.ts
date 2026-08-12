@@ -11,6 +11,7 @@ export default defineConfig({
       usePolling: true,
     },
     proxy: {
+      '/api': 'http://api:8000',
       '/backoffice': 'http://api:8000',
       '/static': 'http://api:8000',
       '/health': 'http://api:8000',

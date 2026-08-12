@@ -25,6 +25,14 @@ def make_owner() -> User:
     return user
 
 
+def test_anonymous_user_can_open_password_reset_pages(client: Client) -> None:
+    reset = client.get("/backoffice/password_reset/")
+    done = client.get("/backoffice/password_reset/done/")
+    complete = client.get("/backoffice/password_reset/complete/")
+
+    assert reset.status_code == done.status_code == complete.status_code == 200
+
+
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 def test_password_reset_response_is_existence_neutral(client: Client) -> None:
     make_owner()

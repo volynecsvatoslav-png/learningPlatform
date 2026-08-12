@@ -1,0 +1,5 @@
+{% extends "admin/change_list.html" %}
+{% block object-tools-items %}
+<li><a href="{% url 'backoffice:media_assets_mediaasset_upload' %}">Загрузить медиа</a></li>
+{{ block.super }}
+{% endblock %}

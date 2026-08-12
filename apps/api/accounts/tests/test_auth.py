@@ -47,3 +47,12 @@ def test_unverified_vendor_admin_cannot_log_in(client: Client) -> None:
 
     assert response.status_code == 200
     assert "sessionid" not in client.cookies
+
+
+def test_invalid_backoffice_login_returns_form_without_server_error(client: Client) -> None:
+    response = client.post(
+        "/backoffice/login/", {"username": "missing@example.com", "password": PASSWORD}
+    )
+
+    assert response.status_code == 200
+    assert not response.wsgi_request.user.is_authenticated

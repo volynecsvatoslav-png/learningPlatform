@@ -27,7 +27,7 @@ def postgres_database() -> dict[str, object]:
 
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-development-key")
-DEBUG = env_bool("DJANGO_DEBUG")
+DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = [
     host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",") if host
 ]
@@ -43,6 +43,8 @@ INSTALLED_APPS = [
     "rest_framework",
     "accounts",
     "vendors",
+    "media_assets",
+    "learning",
 ]
 
 MIDDLEWARE = [
@@ -79,6 +81,25 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 
+MEDIA_S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
+MEDIA_S3_PUBLIC_ENDPOINT_URL = os.getenv("S3_PUBLIC_ENDPOINT_URL", MEDIA_S3_ENDPOINT_URL)
+MEDIA_S3_REGION = os.getenv("S3_REGION", "us-east-1")
+MEDIA_S3_BUCKET = os.getenv("S3_BUCKET", "learning-platform")
+MEDIA_S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minio-local")
+MEDIA_S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "minio-local-secret")
+MEDIA_S3_USE_SSL = env_bool("S3_USE_SSL", False)
+MEDIA_S3_CHECKSUM_POLICY_SUPPORTED = env_bool("S3_CHECKSUM_POLICY_SUPPORTED", False)
+MEDIA_UPLOAD_URL_TTL_SECONDS = min(int(os.getenv("MEDIA_UPLOAD_URL_TTL_SECONDS", "600")), 600)
+MEDIA_GET_URL_TTL_SECONDS = min(int(os.getenv("MEDIA_GET_URL_TTL_SECONDS", "60")), 60)
+MEDIA_MAX_BYTES = {
+    "image": int(os.getenv("MEDIA_IMAGE_MAX_BYTES", str(20 * 1024 * 1024))),
+    "audio": int(os.getenv("MEDIA_AUDIO_MAX_BYTES", str(250 * 1024 * 1024))),
+    "video": int(os.getenv("MEDIA_VIDEO_MAX_BYTES", str(1024 * 1024 * 1024))),
+}
+MEDIA_MAX_DURATION_SECONDS = int(os.getenv("MEDIA_MAX_DURATION_SECONDS", str(4 * 60 * 60)))
+MEDIA_FFPROBE_PATH = os.getenv("MEDIA_FFPROBE_PATH", "ffprobe")
+MEDIA_FFPROBE_TIMEOUT_SECONDS = int(os.getenv("MEDIA_FFPROBE_TIMEOUT_SECONDS", "30"))
+
 AUTH_USER_MODEL = "accounts.User"
 AUTHENTICATION_BACKENDS = ["accounts.auth.BackofficeAuthenticationBackend"]
 PASSWORD_HASHERS = [
@@ -95,6 +116,18 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 PASSWORD_RESET_TIMEOUT = 30 * 60
+LOGIN_REDIRECT_URL = "/backoffice/"
+LOGIN_URL = "/backoffice/login/"
+LOGOUT_REDIRECT_URL = "/backoffice/login/"
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "DJANGO_CSRF_TRUSTED_ORIGINS",
+        "http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173,http://127.0.0.1:8000",
+    ).split(",")
+    if origin.strip()
+]
 
 LANGUAGE_CODE = "ru-ru"
 TIME_ZONE = "UTC"

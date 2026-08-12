@@ -1,0 +1,37 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p>Файл загружается прямо в приватное хранилище. Не закрывайте эту страницу до завершения проверки.</p>
+<form id="media-upload-form">
+  {% csrf_token %}
+  <div><label for="vendor">Вендор</label><select id="vendor" required>{% for vendor in vendors %}<option value="{{ vendor.id }}">{{ vendor.name }}</option>{% endfor %}</select></div>
+  <div><label for="kind">Тип</label><select id="kind"><option value="image">Изображение</option><option value="audio">Аудио</option><option value="video">Видео</option></select></div>
+  <div><label for="file">Файл</label><input id="file" type="file" required></div>
+  <button type="submit">Загрузить</button>
+</form>
+<p id="result" aria-live="polite"></p>
+<script>
+const form = document.getElementById("media-upload-form");
+const result = document.getElementById("result");
+const csrf = document.querySelector("[name=csrfmiddlewaretoken]").value;
+async function sha256(file) {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+form.addEventListener("submit", async event => {
+  event.preventDefault();
+  const file = document.getElementById("file").files[0];
+  result.textContent = "Подготовка загрузки...";
+  const response = await fetch("{{ create_url }}", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json", "X-CSRFToken": csrf}, body: JSON.stringify({vendor_id: document.getElementById("vendor").value, kind: document.getElementById("kind").value, original_name: file.name, content_type: file.type, size_bytes: file.size, sha256: await sha256(file)})});
+  const payload = await response.json();
+  if (!response.ok) { result.textContent = "Ошибка: " + JSON.stringify(payload); return; }
+  const upload = new FormData();
+  Object.entries(payload.upload.fields).forEach(([key, value]) => upload.append(key, value));
+  upload.append("file", file);
+  const sent = await fetch(payload.upload.url, {method: "POST", body: upload});
+  if (!sent.ok) { result.textContent = "Хранилище отклонило файл."; return; }
+  const completed = await fetch("/api/v1/backoffice/media/" + payload.asset.id + "/complete", {method: "POST", credentials: "same-origin", headers: {"X-CSRFToken": csrf}});
+  result.textContent = completed.ok ? "Файл отправлен на проверку. Обновите список через несколько секунд." : "Не удалось запустить проверку.";
+});
+</script>
+{% endblock %}

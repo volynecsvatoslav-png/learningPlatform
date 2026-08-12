@@ -8,9 +8,11 @@ version = "0.1.0"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "argon2-cffi==25.1.0",
+    "boto3==1.43.69",
     "celery==5.5.3",
     "Django==5.2.17",
     "djangorestframework==3.18.0",
+    "filetype==1.2.0",
     "gunicorn==23.0.0",
     "psycopg[binary]==3.2.10",
     "redis==6.4.0",
@@ -32,9 +34,9 @@ dev = [
 py-modules = []
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "config.settings"
+DJANGO_SETTINGS_MODULE = "config.settings_test"
 python_files = ["test_*.py"]
-testpaths = ["accounts/tests", "vendors/tests"]
+testpaths = ["accounts/tests", "vendors/tests", "learning/tests", "media_assets/tests"]
 addopts = "--strict-config --strict-markers"
 
 [tool.ruff]
@@ -56,3 +58,7 @@ exclude = ["migrations|tests"]
 django_settings_module = "config.settings"
 strict_settings = true
 strict_model_abstract_attrs = true
+
+[[tool.mypy.overrides]]
+module = ["boto3", "botocore.config", "celery", "filetype"]
+ignore_missing_imports = true

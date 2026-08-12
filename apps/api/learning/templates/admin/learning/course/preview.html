@@ -1,0 +1,27 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p>Это неизменяемый опубликованный снимок revision {{ snapshot.revision_number }}.</p>
+<h2>{{ snapshot.title }}</h2>
+{% if snapshot.short_description %}<p>{{ snapshot.short_description }}</p>{% endif %}
+{% for module in snapshot.modules %}
+<section>
+  <h2>{{ module.position }}. {{ module.title }}</h2>
+  {% if module.description %}<p>{{ module.description }}</p>{% endif %}
+  {% for lesson in module.lessons %}
+  <article>
+    <h3>{{ lesson.position }}. {{ lesson.title }}</h3>
+    {% if lesson.description %}<p>{{ lesson.description }}</p>{% endif %}
+    {% for unit in lesson.content_units %}
+      <div>
+        {% if unit.title %}<strong>{{ unit.title }}</strong>{% endif %}
+        {% if unit.type == "text" %}<pre>{{ unit.text_markdown }}</pre>{% else %}<p>{{ unit.type }}: {{ unit.media_asset_id }}</p>{% endif %}
+      </div>
+    {% endfor %}
+  </article>
+  {% endfor %}
+</section>
+{% empty %}
+<p>В опубликованном снимке нет модулей.</p>
+{% endfor %}
+{% endblock %}
