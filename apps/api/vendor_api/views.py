@@ -257,6 +257,15 @@ class VendorCoursePreviewView(VendorAPIView):
         return Response(course.current_revision.snapshot_json)
 
 
+class VendorCourseArchiveView(VendorAPIView):
+    def post(self, request: Request, course_id: uuid.UUID) -> Response:
+        _, course = _course_context(
+            request, course_id, (VendorMember.Role.OWNER, VendorMember.Role.EDITOR)
+        )
+        course.archive()
+        return Response(VendorCourseSerializer(course).data)
+
+
 class VendorCourseStructureView(VendorAPIView):
     def get(self, request: Request, course_id: uuid.UUID) -> Response:
         _, course = _course_context(request, course_id)

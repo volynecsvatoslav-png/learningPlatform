@@ -1,0 +1,9 @@
+{
+  "name": "Контур: обучение",
+  "short_name": "Контур",
+  "start_url": "/app/",
+  "display": "standalone",
+  "background_color": "#f2efe7",
+  "theme_color": "#294936",
+  "icons": []
+}

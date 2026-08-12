@@ -11,6 +11,10 @@ if (!rootElement) {
   throw new Error('Не найден корневой элемент приложения')
 }
 
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  void navigator.serviceWorker.register('/sw.js')
+}
+
 createRoot(rootElement).render(
   <StrictMode>
     <QueryProvider>

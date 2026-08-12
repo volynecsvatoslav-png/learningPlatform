@@ -4,7 +4,16 @@ from django.urls import path, reverse_lazy
 from accounts.admin import backoffice_site
 from accounts.forms import BackofficePasswordResetForm
 from config.health import health
-from learner.views import AccessLinkView, LearnerSessionView
+from learner.views import (
+    AccessLinkView,
+    LearnerCourseDetailView,
+    LearnerCourseListView,
+    LearnerCsrfView,
+    LearnerLogoutView,
+    LearnerProgressView,
+    LearnerSessionView,
+    LearnerStreamURLView,
+)
 from media_assets.views import (
     MediaStatusView,
     StreamURLView,
@@ -17,6 +26,7 @@ from vendor_api.views import (
     VendorAccessReissueView,
     VendorAccessRevokeView,
     VendorAuthView,
+    VendorCourseArchiveView,
     VendorCourseDetailView,
     VendorCourseListView,
     VendorCoursePreviewView,
@@ -75,6 +85,11 @@ urlpatterns = [
         name="vendor-course-publish",
     ),
     path(
+        "api/v1/vendor/courses/<uuid:course_id>/archive",
+        VendorCourseArchiveView.as_view(),
+        name="vendor-course-archive",
+    ),
+    path(
         "api/v1/vendor/courses/<uuid:course_id>/preview",
         VendorCoursePreviewView.as_view(),
         name="vendor-course-preview",
@@ -122,7 +137,30 @@ urlpatterns = [
         name="vendor-media-status",
     ),
     path("api/v1/learner/access/<str:token>", AccessLinkView.as_view(), name="learner-access"),
+    path("api/v1/learner/csrf", LearnerCsrfView.as_view(), name="learner-csrf"),
     path("api/v1/learner/session", LearnerSessionView.as_view(), name="learner-session"),
+    path("api/v1/learner/logout", LearnerLogoutView.as_view(), name="learner-logout"),
+    path("api/v1/learner/courses", LearnerCourseListView.as_view(), name="learner-courses"),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>",
+        LearnerCourseDetailView.as_view(),
+        name="learner-course",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/progress",
+        LearnerProgressView.as_view(),
+        name="learner-progress-list",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/progress/<uuid:lesson_id>",
+        LearnerProgressView.as_view(),
+        name="learner-progress",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/media/<uuid:asset_id>/stream-url",
+        LearnerStreamURLView.as_view(),
+        name="learner-stream-url",
+    ),
     path(
         "backoffice/password_reset/",
         auth_views.PasswordResetView.as_view(

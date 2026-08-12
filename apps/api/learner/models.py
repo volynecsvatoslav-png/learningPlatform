@@ -51,3 +51,38 @@ class AccessLink(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+
+
+class LearnerSession(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    learner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="learner_sessions")
+    session_key = models.CharField(max_length=40, unique=True)
+    device_hash = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+
+class LessonProgress(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    learner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="lesson_progress")
+    lesson_id = models.UUIDField()
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="lesson_progress")
+    percent = models.PositiveSmallIntegerField(default=0)
+    status = models.CharField(max_length=16, default="in_progress")
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("learner", "lesson_id"), name="learner_progress_learner_lesson_unique"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(percent__gte=0, percent__lte=100),
+                name="learner_progress_percent_range",
+            ),
+        ]
