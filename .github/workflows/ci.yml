@@ -48,7 +48,7 @@ jobs:
       - run: pip install --requirement requirements.lock
       - run: ruff check .
       - run: ruff format --check .
-      - run: mypy accounts vendors learning media_assets config
+      - run: mypy accounts vendors learning media_assets learner vendor_api config
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py migrate --noinput
       - run: pytest

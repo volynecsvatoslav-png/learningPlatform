@@ -80,15 +80,25 @@ MinIO bucket не имеет anonymous policy. Не передавайте `obje
 ## Автоматические проверки
 
 ```powershell
-docker compose run --rm api sh -c "ruff check . && ruff format --check . && mypy accounts vendors learning media_assets config && python manage.py makemigrations --check --dry-run && pytest"
+docker compose run --rm api sh -c "ruff check . && ruff format --check . && mypy accounts vendors learning media_assets learner vendor_api config && python manage.py makemigrations --check --dry-run && pytest"
 docker compose run --rm frontend sh -c "npm run lint && npm run typecheck && npm run test && npm run build"
-docker run --rm -it --network host -v "${PWD}:/work" -w /work mcr.microsoft.com/playwright:v1.55.0-noble npx playwright test
+```
+
+E2E полностью создаёт курс и доступ через vendor cabinet. Запускайте его на чистых volumes;
+bootstrap-команда намеренно откажется работать без `DEBUG`, явного флага или на базе с другими
+данными:
+
+```powershell
+docker compose down --volumes --remove-orphans
+docker compose up --build --detach --wait
+docker compose exec -e E2E_BOOTSTRAP_ENABLED=true -e E2E_OWNER_EMAIL=owner.e2e@example.com -e E2E_OWNER_PASSWORD="unusual e2e password 48371" -e E2E_VENDOR_NAME="E2E Vendor" -e E2E_VENDOR_SLUG=e2e-vendor api python manage.py bootstrap_e2e_owner
+docker run --rm -it --network host -v "${PWD}:/work" -w /work -e E2E_OWNER_EMAIL=owner.e2e@example.com -e E2E_OWNER_PASSWORD="unusual e2e password 48371" -e E2E_VENDOR_NAME="E2E Vendor" -e E2E_BASE_URL=http://localhost:5173 -e E2E_MAILPIT_URL=http://localhost:8025 mcr.microsoft.com/playwright:v1.55.0-noble sh -lc "npm ci && npx --no-install playwright test"
 ```
 
 ## Ограничения
 
 - PWA manifest и базовый service worker подготовлены, но скачивание курса и полноценный offline-режим не реализованы.
 - Learner session использует серверную Django session cookie; `device_id`, User-Agent и IP не используются как фактор блокировки.
-- E2E требует уже созданного vendor owner, опубликованного курса и Mailpit message; значения можно передать через `E2E_VENDOR_EMAIL` и `E2E_VENDOR_PASSWORD`.
+- E2E bootstrap доступен только при `DEBUG=true` и `E2E_BOOTSTRAP_ENABLED=true`; используйте его только на одноразовой чистой базе.
 - Rate limits, полный CSP/CORS hardening, production deployment и MFA относятся к итерации 1.5. MFA обязательно перед реальными продажами.
 - Локальные примеры секретов нельзя использовать в production.

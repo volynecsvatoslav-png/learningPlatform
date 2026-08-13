@@ -34,6 +34,7 @@ from vendor_api.views import (
     VendorCourseStructureView,
     VendorCsrfView,
     VendorLogoutView,
+    VendorMediaListView,
     VendorMemberDetailView,
     VendorMemberListView,
     VendorMeView,
@@ -116,6 +117,7 @@ urlpatterns = [
         name="vendor-access-reissue",
     ),
     path("api/v1/vendor/members", VendorMemberListView.as_view(), name="vendor-members"),
+    path("api/v1/vendor/media", VendorMediaListView.as_view(), name="vendor-media-list"),
     path(
         "api/v1/vendor/members/<uuid:member_id>",
         VendorMemberDetailView.as_view(),

@@ -2,14 +2,11 @@ from rest_framework import serializers
 
 from learner.models import Enrollment
 from learning.models import ContentUnit, Course, Lesson, Module
-from media_assets.models import MediaAsset
 from vendors.models import VendorMember
 
 
 class VendorCourseSerializer(serializers.ModelSerializer[Course]):
-    cover_asset_id = serializers.PrimaryKeyRelatedField(
-        source="cover_asset", queryset=MediaAsset.objects.all(), required=False, allow_null=True
-    )
+    cover_asset_id = serializers.UUIDField(required=False, allow_null=True)
     published_revision = serializers.IntegerField(
         source="current_revision.revision_number", read_only=True
     )
@@ -87,6 +84,53 @@ class StructureSerializer(serializers.Serializer[dict[str, object]]):
     media_asset_id = serializers.UUIDField(required=False, allow_null=True)
     is_downloadable = serializers.BooleanField(required=False)
 
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        entity = attrs["entity"]
+        action = attrs["action"]
+        if action in {"update", "delete", "move"} and "id" not in attrs:
+            raise serializers.ValidationError({"id": "This field is required."})
+        if action == "move" and "position" not in attrs:
+            raise serializers.ValidationError({"position": "This field is required."})
+        if action == "create" and entity in {"lesson", "content"} and "parent_id" not in attrs:
+            raise serializers.ValidationError({"parent_id": "This field is required."})
+        if action == "create" and entity in {"module", "lesson"} and not attrs.get("title"):
+            raise serializers.ValidationError({"title": "This field is required."})
+        if entity == "content" and action == "create" and "type" not in attrs:
+            raise serializers.ValidationError({"type": "This field is required."})
+        if entity == "content" and action in {"create", "update"}:
+            content_type = attrs.get("type")
+            if content_type == ContentUnit.Type.TEXT:
+                if not str(attrs.get("text_markdown", "")).strip():
+                    raise serializers.ValidationError(
+                        {"text_markdown": "Text content requires Markdown."}
+                    )
+                if attrs.get("media_asset_id") is not None:
+                    raise serializers.ValidationError(
+                        {"media_asset_id": "Text content cannot have media."}
+                    )
+            elif content_type in {
+                ContentUnit.Type.IMAGE,
+                ContentUnit.Type.AUDIO,
+                ContentUnit.Type.VIDEO,
+            } and not attrs.get("media_asset_id"):
+                raise serializers.ValidationError(
+                    {"media_asset_id": "Media content requires an asset."}
+                )
+        if action == "update" and not any(
+            field in attrs
+            for field in (
+                "title",
+                "description",
+                "is_published",
+                "type",
+                "text_markdown",
+                "media_asset_id",
+                "is_downloadable",
+            )
+        ):
+            raise serializers.ValidationError("Provide at least one field to update.")
+        return attrs
+
 
 class AccessGrantSerializer(serializers.Serializer[dict[str, object]]):
     vendor_id = serializers.UUIDField()
@@ -124,5 +168,5 @@ class VendorMemberSerializer(serializers.ModelSerializer[VendorMember]):
 class VendorMemberWriteSerializer(serializers.Serializer[dict[str, object]]):
     vendor_id = serializers.UUIDField()
     email = serializers.EmailField()
-    role = serializers.ChoiceField(choices=(VendorMember.Role.OWNER, VendorMember.Role.EDITOR))
+    role = serializers.ChoiceField(choices=(VendorMember.Role.EDITOR,))
     password = serializers.CharField(min_length=15, write_only=True)

@@ -12,3 +12,5 @@ coverage/
 *.tsbuildinfo
 staticfiles/
 .playwright-mcp/
+test-results/
+playwright-report/

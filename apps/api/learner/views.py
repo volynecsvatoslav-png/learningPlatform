@@ -162,14 +162,16 @@ class LearnerCourseListView(LearnerAPIView):
             [
                 {
                     "id": str(enrollment.course_id),
-                    "title": enrollment.course.title,
-                    "short_description": enrollment.course.short_description,
-                    "description_markdown": enrollment.course.description_markdown,
+                    "title": enrollment.course.current_revision.snapshot_json["title"],
+                    "short_description": enrollment.course.current_revision.snapshot_json[
+                        "short_description"
+                    ],
+                    "description_markdown": enrollment.course.current_revision.snapshot_json[
+                        "description_markdown"
+                    ],
                     "cover_asset_id": enrollment.course.current_revision.snapshot_json.get(
                         "cover_asset_id"
-                    )
-                    if enrollment.course.current_revision
-                    else None,
+                    ),
                 }
                 for enrollment in enrollments
                 if enrollment.course.current_revision is not None
@@ -204,7 +206,7 @@ class LearnerProgressView(LearnerAPIView):
         serializer.is_valid(raise_exception=True)
         percent = serializer.validated_data["percent"]
         completed = serializer.validated_data.get("status") == "completed" or percent == 100
-        progress, _ = LessonProgress.objects.update_or_create(
+        progress, _ = LessonProgress.objects.get_or_create(
             learner=_learner_user(request),
             lesson_id=lesson_id,
             defaults={
@@ -214,6 +216,12 @@ class LearnerProgressView(LearnerAPIView):
                 "completed_at": timezone.now() if completed else None,
             },
         )
+        if progress.status != "completed":
+            progress.course = enrollment.course
+            progress.percent = max(progress.percent, percent)
+            progress.status = "completed" if completed else "in_progress"
+            progress.completed_at = timezone.now() if completed else None
+            progress.save()
         return Response(LearnerProgressSerializer(progress).data)
 
 

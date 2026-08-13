@@ -102,6 +102,45 @@ def test_progress_requires_owned_published_lesson_and_persists_completion(client
     assert LessonProgress.objects.get().status == "completed"
     assert client.get(f"/api/v1/learner/courses/{course.id}/progress").json()[0]["percent"] == 100
 
+    response = client.post(
+        f"/api/v1/learner/courses/{course.id}/progress/{lesson.id}",
+        data={"percent": 1, "status": "in_progress"},
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response.json()["percent"] == 100
+    assert response.json()["status"] == "completed"
+
+
+def test_progress_payload_is_validated(client: Client) -> None:
+    _, course, lesson, token = make_access()
+    session_login(client, token)
+
+    response = client.post(
+        f"/api/v1/learner/courses/{course.id}/progress/{lesson.id}",
+        data={},
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    response = client.post(
+        f"/api/v1/learner/courses/{course.id}/progress/{lesson.id}",
+        data={"percent": 10, "status": "completed"},
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+
+
+def test_course_list_uses_published_snapshot_metadata(client: Client) -> None:
+    _, course, _, token = make_access()
+    published_title = course.title
+    course.title = "Unpublished draft title"
+    course.save(update_fields=("title",))
+    session_login(client, token)
+
+    response = client.get("/api/v1/learner/courses")
+    assert response.status_code == 200
+    assert response.json()[0]["title"] == published_title
+
 
 def test_foreign_course_and_media_url_are_not_available(client: Client) -> None:
     _, _, _, token = make_access()

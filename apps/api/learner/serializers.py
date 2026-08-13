@@ -4,12 +4,15 @@ from learner.models import LessonProgress
 
 
 class LearnerProgressSerializer(serializers.ModelSerializer[LessonProgress]):
+    percent = serializers.IntegerField(min_value=0, max_value=100)
+    status = serializers.ChoiceField(choices=("in_progress", "completed"), required=False)
+
     class Meta:
         model = LessonProgress
         fields = ("lesson_id", "percent", "status", "completed_at", "updated_at")
         read_only_fields = ("lesson_id", "completed_at", "updated_at")
 
-    def validate_percent(self, value: int) -> int:
-        if not 0 <= value <= 100:
-            raise serializers.ValidationError("Процент должен быть от 0 до 100.")
-        return value
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        if attrs.get("status") == "completed" and attrs.get("percent") != 100:
+            raise serializers.ValidationError({"percent": "Completed progress must be 100%."})
+        return attrs

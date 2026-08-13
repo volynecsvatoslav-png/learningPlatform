@@ -119,11 +119,13 @@ def create_content_unit(
     lesson: Lesson, *, position: int | None = None, **values: Any
 ) -> ContentUnit:
     locked_lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
-    item = ContentUnit.objects.create(
+    item = ContentUnit(
         lesson=locked_lesson,
         position=ContentUnit.objects.filter(lesson=locked_lesson).count() + 1,
         **values,
     )
+    item.full_clean()
+    item.save()
     return move_content_unit(item, position or item.position)
 
 

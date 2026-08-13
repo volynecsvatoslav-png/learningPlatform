@@ -5,6 +5,7 @@ export type Course = {
   slug: string
   short_description: string
   description_markdown: string
+  cover_asset_id: string | null
   status: 'draft' | 'published' | 'archived'
   offline_revision: number
   published_revision: number | null
@@ -24,6 +25,7 @@ export type ContentUnit = {
   position: number
   text_markdown: string | null
   media_asset_id: string | null
+  is_downloadable?: boolean
 }
 export type Enrollment = {
   id: string
@@ -38,6 +40,14 @@ export type MediaAsset = {
   status: 'pending' | 'uploaded' | 'validating' | 'ready' | 'rejected'
   original_name: string
   rejection_reason: string | null
+  created_at?: string
+}
+export type VendorMember = {
+  id: string
+  vendor_id: string
+  email: string
+  role: 'owner' | 'editor'
+  created_at: string
 }
 export type LearnerCourse = {
   id: string
@@ -51,6 +61,13 @@ export type LearnerSnapshot = {
   title: string
   description_markdown: string
   modules: Array<{ id: string; title: string; description: string; lessons: Array<{ id: string; title: string; description: string; content_units: ContentUnit[] }> }>
+}
+export type LearnerProgress = {
+  lesson_id: string
+  percent: number
+  status: 'in_progress' | 'completed'
+  completed_at: string | null
+  updated_at: string
 }
 
 let csrfToken = ''
@@ -91,15 +108,20 @@ export async function csrf(): Promise<string> {
 }
 
 export const vendorApi = {
-  login: (email: string, password: string) => request<{ ok: true }>('/api/v1/vendor/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  login: async (email: string, password: string) => {
+    const result = await request<{ ok: true }>('/api/v1/vendor/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+    csrfToken = ''
+    return result
+  },
   logout: () => request<{ ok: true }>('/api/v1/vendor/auth/logout', { method: 'POST' }),
   reset: (email: string) => request<{ ok: true }>('/api/v1/vendor/auth/password-reset', { method: 'POST', body: JSON.stringify({ email }) }),
+  resetPassword: (uid: string, token: string, password: string) => request<{ ok: true }>(`/api/v1/vendor/auth/password-reset/${encodeURIComponent(uid)}/${encodeURIComponent(token)}`, { method: 'POST', body: JSON.stringify({ password }) }),
   me: () => request<{ email: string; vendors: Vendor[] }>('/api/v1/vendor/me'),
   courses: (vendorId: string) => request<Course[]>(`/api/v1/vendor/courses?vendor_id=${vendorId}`),
   createCourse: (vendorId: string, data: Pick<Course, 'title' | 'slug' | 'short_description' | 'description_markdown'>) => request<Course>(`/api/v1/vendor/courses?vendor_id=${vendorId}`, { method: 'POST', body: JSON.stringify(data) }),
   updateCourse: (id: string, data: Partial<Course>) => request<Course>(`/api/v1/vendor/courses/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   archiveCourse: (id: string) => request<Course>(`/api/v1/vendor/courses/${id}/archive`, { method: 'POST' }),
-  preview: (id: string) => request<Record<string, unknown>>(`/api/v1/vendor/courses/${id}/preview`),
+  preview: (id: string) => request<LearnerSnapshot>(`/api/v1/vendor/courses/${id}/preview`),
   structure: (id: string) => request<{ modules: Array<Module & { lessons: Array<Lesson & { content_units: ContentUnit[] }> }> }>(`/api/v1/vendor/courses/${id}/structure`),
   structureAction: (id: string, data: Record<string, unknown>) => request<Module | Lesson | ContentUnit>(`/api/v1/vendor/courses/${id}/structure`, { method: 'POST', body: JSON.stringify(data) }),
   publish: (id: string) => request<{ revision: number }>(`/api/v1/vendor/courses/${id}/publish`, { method: 'POST' }),
@@ -107,6 +129,10 @@ export const vendorApi = {
   grant: (vendorId: string, learnerEmail: string, courseIds: string[]) => request<Enrollment[]>('/api/v1/vendor/access/grant', { method: 'POST', body: JSON.stringify({ vendor_id: vendorId, learner_email: learnerEmail, course_ids: courseIds }) }),
   revoke: (id: string) => request<Enrollment>(`/api/v1/vendor/access/${id}/revoke`, { method: 'POST' }),
   reissue: (id: string) => request<Enrollment>(`/api/v1/vendor/access/${id}/reissue`, { method: 'POST' }),
+  media: (vendorId: string) => request<MediaAsset[]>(`/api/v1/vendor/media?vendor_id=${encodeURIComponent(vendorId)}`),
+  members: (vendorId: string) => request<VendorMember[]>(`/api/v1/vendor/members?vendor_id=${encodeURIComponent(vendorId)}`),
+  createEditor: (vendorId: string, email: string, password: string) => request<VendorMember>('/api/v1/vendor/members', { method: 'POST', body: JSON.stringify({ vendor_id: vendorId, email, password, role: 'editor' }) }),
+  deleteMember: (id: string) => request<undefined>(`/api/v1/vendor/members/${id}`, { method: 'DELETE' }),
   uploadMedia: async (vendorId: string, file: File, kind: MediaAsset['kind']) => {
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
     const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -122,15 +148,20 @@ export const vendorApi = {
     return request<MediaAsset>(`/api/v1/vendor/media/${created.asset.id}/complete`, { method: 'POST' })
   },
   mediaStatus: (assetId: string) => request<MediaAsset>(`/api/v1/vendor/media/${assetId}`),
+  streamUrl: (assetId: string) => request<{ url: string }>(`/api/v1/media/${assetId}/stream-url`),
 }
 
 export const learnerApi = {
   access: (token: string) => request<{ email: string; course_title: string; ready: boolean }>(`/api/v1/learner/access/${encodeURIComponent(token)}`),
-  login: (token: string) => request<{ ok: true; course_id: string }>('/api/v1/learner/session', { method: 'POST', body: JSON.stringify({ token }) }),
+  login: async (token: string) => {
+    const result = await request<{ ok: true; course_id: string }>('/api/v1/learner/session', { method: 'POST', body: JSON.stringify({ token }) })
+    csrfToken = ''
+    return result
+  },
   logout: () => request<{ ok: true }>('/api/v1/learner/logout', { method: 'POST' }),
   courses: () => request<LearnerCourse[]>('/api/v1/learner/courses'),
   course: (id: string) => request<LearnerSnapshot>(`/api/v1/learner/courses/${id}`),
-  progress: (courseId: string) => request<Array<{ lesson_id: string; percent: number; status: string }>>(`/api/v1/learner/courses/${courseId}/progress`),
+  progress: (courseId: string) => request<LearnerProgress[]>(`/api/v1/learner/courses/${courseId}/progress`),
   saveProgress: (courseId: string, lessonId: string, percent: number) => request(`/api/v1/learner/courses/${courseId}/progress/${lessonId}`, { method: 'POST', body: JSON.stringify({ percent, status: percent === 100 ? 'completed' : 'in_progress' }) }),
   streamUrl: (courseId: string, assetId: string) => request<{ url: string }>(`/api/v1/learner/courses/${courseId}/media/${assetId}/stream-url`),
 }

@@ -4,8 +4,11 @@ from typing import Any, cast
 
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
+from django.db import IntegrityError, transaction
 from django.http import Http404
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -14,6 +17,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_protect
 from rest_framework.authentication import SessionAuthentication
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -21,7 +25,7 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.rate_limit import auth_rate_limited
-from learner.models import AccessLink, Enrollment, hash_access_token
+from learner.models import AccessLink, Enrollment, LearnerSession, hash_access_token
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import (
     PublicationValidationError,
@@ -37,6 +41,7 @@ from learning.services import (
     publish_course,
 )
 from media_assets.models import MediaAsset
+from media_assets.serializers import MediaAssetSerializer
 from vendor_api.serializers import (
     AccessGrantSerializer,
     EnrollmentSerializer,
@@ -53,7 +58,14 @@ from vendors.policies import VendorContext
 
 
 class CsrfSessionAuthentication(SessionAuthentication):
-    pass
+    def authenticate(self, request: Request):  # type: ignore[no-untyped-def]
+        result = super().authenticate(request)
+        if (
+            result is not None
+            and LearnerSession.objects.filter(session_key=request.session.session_key).exists()
+        ):
+            return None
+        return result
 
 
 class VendorAPIView(APIView):
@@ -159,6 +171,12 @@ class VendorPasswordResetConfirmView(APIView):
         if not default_token_generator.check_token(user, token):
             return Response({"code": "INVALID_RESET_LINK"}, status=400)
         password = str(request.data.get("password", ""))
+        try:
+            validate_password(password, user=user)
+        except DjangoValidationError as error:
+            return Response(
+                {"code": "PASSWORD_INVALID", "password": list(error.messages)}, status=400
+            )
         user.set_password(password)
         user.save(update_fields=("password", "updated_at"))
         return Response({"ok": True})
@@ -196,6 +214,17 @@ def _course_context(
     return context, context.get_object_or_404(Course.objects, pk=course_id)
 
 
+def _cover_for_vendor(vendor_id: uuid.UUID, asset_id: object) -> MediaAsset | None:
+    if asset_id is None:
+        return None
+    return MediaAsset.objects.filter(
+        pk=cast(uuid.UUID, asset_id),
+        vendor_id=vendor_id,
+        status=MediaAsset.Status.READY,
+        kind=MediaAsset.Kind.IMAGE,
+    ).first()
+
+
 class VendorCourseListView(VendorAPIView):
     def get(self, request: Request) -> Response:
         context = self.context(request)
@@ -206,7 +235,12 @@ class VendorCourseListView(VendorAPIView):
         context = self.context(request, roles=(VendorMember.Role.OWNER, VendorMember.Role.EDITOR))
         serializer = VendorCourseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        course = serializer.save(vendor=context.vendor)
+        data = dict(serializer.validated_data)
+        cover_id = data.pop("cover_asset_id", None)
+        cover = _cover_for_vendor(context.vendor.id, cover_id)
+        if cover_id is not None and cover is None:
+            return Response({"code": "MEDIA_NOT_READY"}, status=409)
+        course = Course.objects.create(vendor=context.vendor, cover_asset=cover, **data)
         return Response(VendorCourseSerializer(course).data, status=201)
 
 
@@ -221,12 +255,17 @@ class VendorCourseDetailView(VendorAPIView):
         )
         serializer = VendorCourseSerializer(course, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        cover = serializer.validated_data.get("cover_asset")
-        if cover is not None and (
-            cover.vendor_id != course.vendor_id or cover.status != MediaAsset.Status.READY
-        ):
-            return Response({"code": "MEDIA_NOT_READY"}, status=409)
-        course = serializer.save()
+        data = dict(serializer.validated_data)
+        if "cover_asset_id" in data:
+            cover_id = data.pop("cover_asset_id")
+            cover = _cover_for_vendor(course.vendor_id, cover_id)
+            if cover_id is not None and cover is None:
+                return Response({"code": "MEDIA_NOT_READY"}, status=409)
+            data["cover_asset"] = cover
+        for field, value in data.items():
+            setattr(course, field, value)
+        course.full_clean()
+        course.save()
         return Response(VendorCourseSerializer(course).data)
 
     def delete(self, request: Request, course_id: uuid.UUID) -> Response:
@@ -317,7 +356,7 @@ class VendorCourseStructureView(VendorAPIView):
                 delete_module(module_item)
                 return Response(status=204)
             elif action == "move":
-                move_module(module_item, data["position"])
+                module_item = move_module(module_item, data["position"])
             else:
                 for field in ("title", "description"):
                     if field in data:
@@ -327,15 +366,15 @@ class VendorCourseStructureView(VendorAPIView):
                 VendorModuleSerializer(module_item).data, status=201 if action == "create" else 200
             )
         if entity == "lesson":
-            module = Module.objects.filter(pk=data.get("parent_id"), course=course).first()
-            if module is None:
-                raise Http404
-            lesson_item = (
-                Lesson.objects.filter(pk=data.get("id"), module=module).first()
-                if data.get("id")
+            lesson_item: Lesson | None = None
+            module = (
+                Module.objects.filter(pk=data.get("parent_id"), course=course).first()
+                if data.get("parent_id")
                 else None
             )
             if action == "create":
+                if module is None:
+                    raise Http404
                 lesson_item = create_lesson(
                     module,
                     position=data.get("position"),
@@ -343,13 +382,17 @@ class VendorCourseStructureView(VendorAPIView):
                     description=data.get("description", ""),
                     is_published=data.get("is_published", False),
                 )
-            elif lesson_item is None:
+            else:
+                lesson_item = Lesson.objects.filter(
+                    pk=data.get("id"), module__course=course
+                ).first()
+            if lesson_item is None:
                 raise Http404
-            elif action == "delete":
+            if action == "delete":
                 delete_lesson(lesson_item)
                 return Response(status=204)
             elif action == "move":
-                move_lesson(lesson_item, data["position"])
+                lesson_item = move_lesson(lesson_item, data["position"])
             else:
                 for field in ("title", "description", "is_published"):
                     if field in data:
@@ -359,61 +402,80 @@ class VendorCourseStructureView(VendorAPIView):
                 VendorLessonSerializer(lesson_item).data,
                 status=201 if action == "create" else 200,
             )
-        lesson = Lesson.objects.filter(pk=data.get("parent_id"), module__course=course).first()
-        if lesson is None:
-            raise Http404
-        unit_item = (
-            ContentUnit.objects.filter(pk=data.get("id"), lesson=lesson).first()
-            if data.get("id")
+        lesson = (
+            Lesson.objects.filter(pk=data.get("parent_id"), module__course=course).first()
+            if data.get("parent_id")
             else None
         )
+        unit_item: ContentUnit | None = None
         if action == "create":
-            asset = (
-                MediaAsset.objects.filter(
-                    pk=data.get("media_asset_id"),
-                    vendor=course.vendor,
-                    status=MediaAsset.Status.READY,
-                ).first()
-                if data.get("media_asset_id")
-                else None
-            )
-            if data["type"] != ContentUnit.Type.TEXT and asset is None:
+            if lesson is None:
+                raise Http404
+            content_type = data["type"]
+            asset = self._content_asset(course, content_type, data.get("media_asset_id"))
+            if content_type != ContentUnit.Type.TEXT and asset is None:
                 return Response({"code": "MEDIA_NOT_READY"}, status=409)
-            unit_item = create_content_unit(
-                lesson,
-                position=data.get("position"),
-                type=data["type"],
-                title=data.get("title", ""),
-                text_markdown=data.get("text_markdown"),
-                media_asset=asset,
-                is_downloadable=data.get("is_downloadable", True),
-            )
-        elif unit_item is None:
+            try:
+                unit_item = create_content_unit(
+                    lesson,
+                    position=data.get("position"),
+                    type=content_type,
+                    title=data.get("title", ""),
+                    text_markdown=data.get("text_markdown")
+                    if content_type == ContentUnit.Type.TEXT
+                    else None,
+                    media_asset=asset,
+                    is_downloadable=data.get("is_downloadable", True),
+                )
+            except DjangoValidationError as error:
+                raise DRFValidationError(error.message_dict) from error
+        else:
+            unit_item = ContentUnit.objects.filter(
+                pk=data.get("id"), lesson__module__course=course
+            ).first()
+        if unit_item is None:
             raise Http404
-        elif action == "delete":
+        if action == "delete":
             delete_content_unit(unit_item)
             return Response(status=204)
         elif action == "move":
-            move_content_unit(unit_item, data["position"])
+            unit_item = move_content_unit(unit_item, data["position"])
         else:
-            for field in ("title", "text_markdown", "is_downloadable"):
+            target_type = data.get("type", unit_item.type)
+            for field in ("title", "is_downloadable"):
                 if field in data:
                     setattr(unit_item, field, data[field])
-            if "media_asset_id" in data:
-                asset = MediaAsset.objects.filter(
-                    pk=data["media_asset_id"],
-                    vendor=course.vendor,
-                    status=MediaAsset.Status.READY,
-                ).first()
+            unit_item.type = target_type
+            if target_type == ContentUnit.Type.TEXT:
+                if "text_markdown" in data:
+                    unit_item.text_markdown = data["text_markdown"]
+                unit_item.media_asset = None
+            elif "media_asset_id" in data:
+                asset = self._content_asset(course, target_type, data.get("media_asset_id"))
                 if asset is None:
                     return Response({"code": "MEDIA_NOT_READY"}, status=409)
                 unit_item.media_asset = asset
-            unit_item.full_clean()
+                unit_item.text_markdown = None
+            try:
+                unit_item.full_clean()
+            except DjangoValidationError as error:
+                raise DRFValidationError(error.message_dict) from error
             unit_item.save()
         return Response(
             VendorContentUnitSerializer(unit_item).data,
             status=201 if action == "create" else 200,
         )
+
+    @staticmethod
+    def _content_asset(course: Course, content_type: object, asset_id: object) -> MediaAsset | None:
+        if not asset_id:
+            return None
+        return MediaAsset.objects.filter(
+            pk=cast(uuid.UUID, asset_id),
+            vendor=course.vendor,
+            status=MediaAsset.Status.READY,
+            kind=content_type,
+        ).first()
 
 
 def _enrollment_for_vendor(request: Request, enrollment_id: uuid.UUID) -> tuple[Any, Enrollment]:
@@ -502,15 +564,36 @@ class VendorMemberListView(VendorAPIView):
         context = self.context(
             request, vendor_id=data["vendor_id"], roles=(VendorMember.Role.OWNER,)
         )
-        user, _ = User.objects.get_or_create(
-            email=User.objects.normalize_email_address(data["email"])
-        )
-        user.set_password(data["password"])
-        user.email_verified_at = timezone.now()
-        user.is_staff = True
-        user.save(update_fields=("password", "email_verified_at", "is_staff", "updated_at"))
-        member = VendorMember.objects.create(vendor=context.vendor, user=user, role=data["role"])
+        email = User.objects.normalize_email_address(data["email"])
+        if User.objects.filter(email=email).exists():
+            return Response({"code": "MEMBER_EMAIL_CONFLICT"}, status=409)
+        candidate = User(email=email)
+        try:
+            validate_password(data["password"], user=candidate)
+        except DjangoValidationError as error:
+            return Response(
+                {"code": "PASSWORD_INVALID", "password": list(error.messages)}, status=400
+            )
+        try:
+            with transaction.atomic():
+                user = User.objects.create_user(
+                    email,
+                    data["password"],
+                    email_verified_at=timezone.now(),
+                )
+                member = VendorMember.objects.create(
+                    vendor=context.vendor, user=user, role=VendorMember.Role.EDITOR
+                )
+        except IntegrityError:
+            return Response({"code": "MEMBER_EMAIL_CONFLICT"}, status=409)
         return Response(VendorMemberSerializer(member).data, status=201)
+
+
+class VendorMediaListView(VendorAPIView):
+    def get(self, request: Request) -> Response:
+        context = self.context(request, roles=(VendorMember.Role.OWNER, VendorMember.Role.EDITOR))
+        assets = context.scope(MediaAsset.objects).order_by("-created_at")
+        return Response(MediaAssetSerializer(assets, many=True).data)
 
 
 class VendorMemberDetailView(VendorAPIView):
