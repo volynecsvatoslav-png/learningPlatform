@@ -78,8 +78,8 @@ export class ApiError extends Error {
   code?: string
   body: Record<string, unknown>
 
-  constructor(status: number, code?: string, body: Record<string, unknown> = {}) {
-    super(code ?? `HTTP ${String(status)}`)
+  constructor(status: number, code?: string, body: Record<string, unknown> = {}, message?: string) {
+    super(message ?? code ?? `HTTP ${String(status)}`)
     this.status = status
     this.code = code
     this.body = body
@@ -150,9 +150,19 @@ export const vendorApi = {
         xhr.withCredentials = true
         xhr.setRequestHeader('X-CSRFToken', csrfToken)
         xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100)) }
-        xhr.onerror = () => { reject(new ApiError(0, 'NETWORK_ERROR')) }
+        xhr.timeout = 0
+        const networkError = (code: string) => { reject(new ApiError(0, code, {}, 'Не удалось передать файл. Проверьте соединение и повторите попытку.')) }
+        xhr.onerror = () => { networkError('NETWORK_ERROR') }
+        xhr.ontimeout = () => { networkError('UPLOAD_TIMEOUT') }
+        xhr.onabort = () => { networkError('UPLOAD_ABORTED') }
         xhr.onload = () => {
-          const body = JSON.parse(xhr.responseText || '{}') as Record<string, unknown> & { code?: string }
+          let body: Record<string, unknown> & { code?: string }
+          try {
+            body = JSON.parse(xhr.responseText || '{}') as Record<string, unknown> & { code?: string }
+          } catch {
+            reject(new ApiError(xhr.status, undefined, {}, 'Сервер вернул некорректный ответ.'))
+            return
+          }
           if (xhr.status >= 200 && xhr.status < 300) resolve(body as unknown as MediaAsset)
           else reject(new ApiError(xhr.status, body.code, body))
         }

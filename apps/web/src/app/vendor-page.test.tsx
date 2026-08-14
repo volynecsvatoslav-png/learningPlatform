@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { NewContent, VendorPage } from './vendor-page'
+import { ApiError, vendorApi } from '../lib/api'
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -65,6 +66,20 @@ describe('VendorPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Кабинет недоступен' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Войти в кабинет' })).not.toBeInTheDocument()
+  })
+
+  it('keeps media upload disabled until transfer config is available', async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/api/v1/vendor/me')) return response({ email: 'owner@example.com', vendors: [{ id: 'vendor-1', name: 'Alpha', role: 'owner' }] })
+      if (url.endsWith('/api/v1/vendor/media/config')) return response({ code: 'SERVER_ERROR' }, 500)
+      return workspaceResponse(url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+    await screen.findByRole('heading', { name: 'Alpha' })
+    expect(screen.getByRole('button', { name: 'Загрузить и проверить' })).toBeDisabled()
+    expect(screen.getByText('Не удалось получить режим передачи медиа. Повторите попытку.')).toBeInTheDocument()
   })
 
   it('creates a course from a restored session', async () => {
@@ -139,5 +154,36 @@ describe('VendorPage', () => {
     fireEvent.change(screen.getByLabelText('Новый файл'), { target: { files: [new File(['video'], 'lesson.txt', { type: 'text/plain' })] } })
     fireEvent.click(screen.getByRole('button', { name: 'Загрузить новый файл' }))
     expect(await screen.findByText('Unsupported file format.')).toBeInTheDocument()
+  })
+
+  it('rejects when XHR returns a non-JSON response instead of hanging', async () => {
+    class NonJsonXHR {
+      upload = { onprogress: () => {} }
+      onload: (() => void) | null = null
+      status = 502
+      responseText = '<html>bad gateway</html>'
+      open() {}
+      setRequestHeader() {}
+      send() { this.onload?.() }
+    }
+    vi.stubGlobal('XMLHttpRequest', NonJsonXHR)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ csrfToken: 'csrf-token' })))
+    const result = vendorApi.uploadMedia('proxy', 'vendor-1', new File(['video'], 'lesson.mp4', { type: 'video/mp4' }), 'video')
+    await expect(result).rejects.toMatchObject({ status: 502, message: 'Сервер вернул некорректный ответ.' })
+  })
+
+  it('rejects aborted and network-failed uploads', async () => {
+    class AbortXHR {
+      upload = { onprogress: () => {} }
+      onabort: (() => void) | null = null
+      open() {}
+      setRequestHeader() {}
+      send() { this.onabort?.() }
+    }
+    vi.stubGlobal('XMLHttpRequest', AbortXHR)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ csrfToken: 'csrf-token' })))
+    const result = vendorApi.uploadMedia('proxy', 'vendor-1', new File(['video'], 'lesson.mp4', { type: 'video/mp4' }), 'video')
+    await expect(result).rejects.toMatchObject({ status: 0 })
+    await expect(result).rejects.toBeInstanceOf(ApiError)
   })
 })

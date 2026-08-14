@@ -218,6 +218,22 @@ def test_proxy_upload_streams_file_and_queues_validation(client: Client) -> None
     storage.upload_fileobj.assert_called_once()
     delay.assert_called_once_with(str(asset.id))
 
+    editor = User.objects.create_user(
+        "editor@example.com", PASSWORD, email_verified_at=timezone.now()
+    )
+    VendorMember.objects.create(vendor=vendor, user=editor, role=VendorMember.Role.EDITOR)
+    client.force_login(editor)
+    editor_upload = SimpleUploadedFile("editor.png", b"png", content_type="image/png")
+    with (
+        patch("media_assets.views.get_storage", return_value=storage),
+        patch("media_assets.views.validate_media_asset.delay"),
+    ):
+        editor_response = client.post(
+            "/api/v1/vendor/media/upload-file",
+            {"vendor_id": str(vendor.id), "kind": "image", "file": editor_upload},
+        )
+    assert editor_response.status_code == 201
+
 
 def test_proxy_upload_rejects_foreign_vendor_and_invalid_file(client: Client) -> None:
     alpha = Vendor.objects.create(name="Alpha", slug="alpha")
@@ -248,6 +264,20 @@ def test_proxy_upload_rejects_foreign_vendor_and_invalid_file(client: Client) ->
     )
 
 
+@override_settings(MEDIA_TRANSFER_MODE="presigned")
+def test_proxy_upload_is_disabled_in_presigned_mode(client: Client) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    client.force_login(owner("owner@example.com", vendor))
+    upload = SimpleUploadedFile("lesson.mp4", b"x", content_type="video/mp4")
+
+    response = client.post(
+        "/api/v1/vendor/media/upload-file",
+        {"vendor_id": str(vendor.id), "kind": "video", "file": upload},
+    )
+
+    assert response.status_code == 404
+
+
 def test_proxy_content_supports_range_and_is_private(client: Client) -> None:
     vendor = Vendor.objects.create(name="Alpha", slug="alpha")
     user = owner("owner@example.com", vendor)
@@ -275,3 +305,8 @@ def test_proxy_content_supports_range_and_is_private(client: Client) -> None:
     assert response["Accept-Ranges"] == "bytes"
     assert response["Cache-Control"] == "private, no-store"
     assert b"private/random-key" not in b"".join(response.streaming_content)
+
+    with patch("media_assets.views.get_storage", return_value=storage):
+        invalid = client.get(f"/api/v1/vendor/media/{asset.id}/content", HTTP_RANGE="bytes=99-100")
+    assert invalid.status_code == 416
+    assert invalid["Content-Range"] == "bytes */10"

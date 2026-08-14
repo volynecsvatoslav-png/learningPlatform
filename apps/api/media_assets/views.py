@@ -86,10 +86,16 @@ class MediaTransferConfigView(APIView):
 
 class ProxyUploadView(SessionAPIView):
     def post(self, request: Request) -> Response:
+        if settings.MEDIA_TRANSFER_MODE != "proxy":
+            raise Http404
         serializer = ProxyUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        context = VendorContext.resolve(user=_user(request), vendor_id=data["vendor_id"])
+        context = VendorContext.resolve(
+            user=_user(request),
+            vendor_id=data["vendor_id"],
+            roles=(VendorMember.Role.OWNER, VendorMember.Role.EDITOR),
+        )
         uploaded = data["file"]
         asset_id = uuid.uuid4()
         object_key = f"vendors/{context.vendor.id}/assets/{asset_id}/{uuid.uuid4().hex}"

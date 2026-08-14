@@ -193,6 +193,8 @@ class VendorMeView(VendorAPIView):
         memberships = VendorMember.objects.filter(
             user=cast(User, request.user), vendor__status="active"
         ).select_related("vendor")
+        if not memberships.exists():
+            return Response({"code": "VENDOR_ACCESS_REQUIRED"}, status=403)
         return Response(
             {
                 "email": cast(User, request.user).email,

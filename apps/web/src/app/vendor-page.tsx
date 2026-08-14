@@ -94,7 +94,7 @@ function ContentEditor({ unit, lessonId, position, total, readyMedia, act }: {
   )
 }
 
-export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }: { lessonId: string; readyMedia: MediaAsset[]; act: (data: StructureAction) => void; vendorId: string; transferMode: MediaTransferMode }) {
+export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }: { lessonId: string; readyMedia: MediaAsset[]; act: (data: StructureAction) => void; vendorId: string; transferMode?: MediaTransferMode }) {
   const [type, setType] = useState<ContentUnit['type']>('text')
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
@@ -102,7 +102,7 @@ export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }
   const [file, setFile] = useState<File | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadedId, setUploadedId] = useState<string | null>(null)
-  const upload = useMutation({ mutationFn: () => vendorApi.uploadMedia(transferMode, vendorId, file as File, type as MediaAsset['kind'], setUploadProgress), onSuccess: (asset) => { setUploadedId(asset.id) } })
+  const upload = useMutation({ mutationFn: () => transferMode ? vendorApi.uploadMedia(transferMode, vendorId, file as File, type as MediaAsset['kind'], setUploadProgress) : Promise.reject(new ApiError(503, 'MEDIA_CONFIG_UNAVAILABLE', {}, 'Режим передачи медиа ещё не определён.')), onSuccess: (asset) => { setUploadedId(asset.id) } })
   const uploadStatus = useQuery({ queryKey: ['editor-media-status', uploadedId], queryFn: () => vendorApi.mediaStatus(uploadedId as string), enabled: Boolean(uploadedId), refetchInterval: (query) => query.state.data?.status === 'ready' || query.state.data?.status === 'rejected' ? false : 1000 })
   useEffect(() => { if (uploadStatus.data?.status === 'ready') setAssetId(uploadStatus.data.id) }, [uploadStatus.data])
   const media = readyMedia.filter((asset) => asset.kind === type)
@@ -117,7 +117,7 @@ export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }
         <label>Название<input value={title} onChange={(event) => { setTitle(event.target.value) }} /></label>
         {type === 'text'
           ? <label>Markdown<textarea value={text} onChange={(event) => { setText(event.target.value) }} /></label>
-          : <><label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }}><option value="">Выберите файл</option>{mediaOptions.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label><label>Новый файл<input type="file" accept={`${type}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /></label><button type="button" disabled={!file || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить новый файл</button>{upload.isPending && <progress max="100" value={uploadProgress}>{uploadProgress}%</progress>}{uploadStatus.data && <small>{uploadStatus.data.status === 'ready' ? 'Файл готов и выбран.' : `Проверка: ${uploadStatus.data.status}`}</small>}{upload.error && <><ErrorMessage error={upload.error} /><button type="button" onClick={() => { upload.reset(); upload.mutate() }}>Повторить загрузку</button></>}</>}
+          : <><label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }}><option value="">Выберите файл</option>{mediaOptions.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label><label>Новый файл<input type="file" accept={`${type}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /></label><button type="button" disabled={!file || !transferMode || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить новый файл</button>{upload.isPending && <progress max="100" value={uploadProgress}>{uploadProgress}%</progress>}{uploadStatus.data && <small>{uploadStatus.data.status === 'ready' ? 'Файл готов и выбран.' : `Проверка: ${uploadStatus.data.status}`}</small>}{upload.error && <><ErrorMessage error={upload.error} /><button type="button" onClick={() => { upload.reset(); upload.mutate() }}>Повторить загрузку</button></>}</>}
       </div>
       <button disabled={!canCreate} onClick={() => {
         const content = type === 'text' ? { type, text_markdown: text } : { type, media_asset_id: assetId }
@@ -136,7 +136,7 @@ function LessonEditor({ lesson, moduleId, position, total, readyMedia, act, vend
   readyMedia: MediaAsset[]
   act: (data: StructureAction) => void
   vendorId: string
-  transferMode: MediaTransferMode
+  transferMode?: MediaTransferMode
 }) {
   const [open, setOpen] = useState(false)
   const [title, setTitle] = useState(lesson.title)
@@ -175,7 +175,7 @@ function ModuleEditor({ module, position, total, readyMedia, act, vendorId, tran
   readyMedia: MediaAsset[]
   act: (data: StructureAction) => void
   vendorId: string
-  transferMode: MediaTransferMode
+  transferMode?: MediaTransferMode
 }) {
   const [title, setTitle] = useState(module.title)
   const [description, setDescription] = useState(module.description)
@@ -226,7 +226,7 @@ function PublishedPreview({ snapshot, media }: { snapshot: Awaited<ReturnType<ty
   )
 }
 
-function CourseEditor({ vendor, course, onClose, transferMode }: { vendor: Vendor; course: Course | null; onClose: () => void; transferMode: MediaTransferMode }) {
+function CourseEditor({ vendor, course, onClose, transferMode }: { vendor: Vendor; course: Course | null; onClose: () => void; transferMode?: MediaTransferMode }) {
   const queryClient = useQueryClient()
   const [title, setTitle] = useState(course?.title ?? '')
   const [slug, setSlug] = useState(course?.slug ?? '')
@@ -258,7 +258,7 @@ function CourseEditor({ vendor, course, onClose, transferMode }: { vendor: Vendo
           <label>Описание Markdown<textarea value={description} onChange={(event) => { setDescription(event.target.value) }} /></label>
           <button className="primary-action" type="submit" disabled={save.isPending}>Сохранить курс</button>
         </form>
-        {id && <>
+         {id && <>
            <div className="subsection"><div className="panel-heading"><div><p className="eyebrow">Структура</p><h3>Модули и уроки</h3></div><span className="status">{structure.data?.modules.length ?? 0} модулей</span></div><div className="inline-form"><input aria-label="Название нового модуля" placeholder="Новый модуль" value={moduleTitle} onChange={(event) => { setModuleTitle(event.target.value) }} /><button disabled={!moduleTitle.trim()} onClick={() => { action.mutate({ entity: 'module', action: 'create', title: moduleTitle }); setModuleTitle('') }}>Добавить модуль</button></div>{structure.isLoading && <p className="muted">Загрузка структуры...</p>}{structure.data?.modules.map((module, index) => <ModuleEditor key={module.id} module={module} position={index + 1} total={structure.data.modules.length} readyMedia={readyMedia} act={(data) => { action.mutate(data) }} vendorId={vendor.id} transferMode={transferMode} />)}</div>
           <div className="item-actions course-actions"><button className="primary-action" onClick={() => { publish.mutate() }}>Опубликовать ревизию →</button><button onClick={() => { preview.mutate() }}>Показать опубликованную версию</button><button className="danger-button" onClick={() => { archive.mutate() }}>Архивировать</button></div>
           {preview.data && <PublishedPreview snapshot={preview.data} media={readyMedia} />}
@@ -284,14 +284,14 @@ export function VendorPage() {
   if (loggedOut || authError) return <Login onLogin={() => { setLoggedOut(false); void queryClient.invalidateQueries({ queryKey: ['vendor-me'] }) }} />
   if (me.isLoading) return <main className="loading-screen">Загрузка кабинета...</main>
   if (me.isError || !activeVendor) return <main className="state-screen"><h1>Кабинет недоступен</h1><p>Не удалось восстановить сессию. Повторите попытку позже.</p></main>
-  if (selected !== undefined) return <CourseEditor vendor={activeVendor} course={selected} transferMode={transfer.data?.mode ?? 'proxy'} onClose={() => { setSelected(undefined) }} />
+  if (selected !== undefined) return <CourseEditor vendor={activeVendor} course={selected} transferMode={transfer.data?.mode} onClose={() => { setSelected(undefined) }} />
   const vendors = me.data?.vendors ?? []
   return (
     <main className="workspace">
       <header className="workspace-header"><div><p className="eyebrow">Кабинет вендора</p><h1>{activeVendor.name}</h1>{vendors.length > 1 && <select aria-label="Вендор" value={activeVendor.id} onChange={(event) => { setVendor(vendors.find((item) => item.id === event.target.value) ?? null) }}>{vendors.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}</div><button className="text-button" onClick={() => { logout.mutate() }}>Выйти</button></header>
       <div className="workspace-grid">
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Каталог</p><h2>Ваши курсы</h2></div><button className="primary-action" onClick={() => { setSelected(null) }}>Новый курс +</button></div>{courses.isLoading && <p className="muted">Загрузка курсов...</p>}{courses.isError && <p className="form-error">Курсы не загрузились.</p>}{courses.data?.length === 0 && <p className="empty-state">Курсов пока нет. Создайте первый маршрут обучения.</p>}<div className="course-list">{courses.data?.map((course) => <button className="course-row" key={course.id} onClick={() => { setSelected(course) }}><span><strong>{course.title}</strong><small>{course.short_description || 'Без описания'}</small></span><span className={`status status-${course.status}`}>{course.status} · rev {course.published_revision ?? '—'}</span></button>)}</div></section>
-         <MediaPanel vendor={activeVendor} transferMode={transfer.data?.mode ?? 'proxy'} />
+         <MediaPanel vendor={activeVendor} transferMode={transfer.data?.mode} configError={transfer.error} />
         {activeVendor.role === 'owner' && <AccessPanel vendor={activeVendor} accesses={accesses.data ?? []} />}
         {activeVendor.role === 'owner' && <MembersPanel vendor={activeVendor} />}
       </div>
@@ -320,16 +320,17 @@ function MembersPanel({ vendor }: { vendor: Vendor }) {
   return <section className="panel"><p className="eyebrow">Команда</p><h2>Редакторы</h2><p className="muted">Владельцы могут создать только учетную запись редактора.</p><form className="access-form" onSubmit={(event) => { event.preventDefault(); create.mutate() }}><label>Email редактора<input type="email" value={email} onChange={(event) => { setEmail(event.target.value) }} required /></label><label>Временный пароль<input type="password" minLength={15} value={password} onChange={(event) => { setPassword(event.target.value) }} required /></label><button className="primary-action" type="submit">Создать редактора</button></form>{members.data?.map((member: VendorMember) => <div className="access-row" key={member.id}><span><strong>{member.email}</strong><small>{member.role}</small></span>{member.role === 'editor' && <button className="danger-button" onClick={() => { remove.mutate(member.id) }}>Удалить</button>}</div>)}<ErrorMessage error={create.error ?? remove.error} /></section>
 }
 
-function MediaPanel({ vendor, transferMode }: { vendor: Vendor; transferMode: MediaTransferMode }) {
+function MediaPanel({ vendor, transferMode, configError }: { vendor: Vendor; transferMode?: MediaTransferMode; configError: Error | null }) {
   const [kind, setKind] = useState<MediaAsset['kind']>('image')
   const [file, setFile] = useState<File | null>(null)
   const [assetId, setAssetId] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const media = useQuery({ queryKey: ['vendor-media', vendor.id], queryFn: () => vendorApi.media(vendor.id) })
-  const upload = useMutation({ mutationFn: () => vendorApi.uploadMedia(transferMode, vendor.id, file as File, kind), onSuccess: (asset) => { setAssetId(asset.id); setFile(null); void queryClient.invalidateQueries({ queryKey: ['vendor-media', vendor.id] }) } })
+  const upload = useMutation({ mutationFn: () => transferMode ? vendorApi.uploadMedia(transferMode, vendor.id, file as File, kind) : Promise.reject(new ApiError(503, 'MEDIA_CONFIG_UNAVAILABLE', {}, 'Режим передачи медиа ещё не определён.')), onSuccess: (asset) => { setAssetId(asset.id); setFile(null); void queryClient.invalidateQueries({ queryKey: ['vendor-media', vendor.id] }) } })
   const status = useQuery({ queryKey: ['vendor-media-status', assetId], queryFn: () => vendorApi.mediaStatus(assetId as string), enabled: Boolean(assetId), refetchInterval: (query) => query.state.data?.status === 'ready' || query.state.data?.status === 'rejected' ? false : 1500 })
   useEffect(() => {
     if (status.data?.status === 'ready' || status.data?.status === 'rejected') void queryClient.invalidateQueries({ queryKey: ['vendor-media', vendor.id] })
   }, [queryClient, status.data?.status, vendor.id])
-  return <section className="panel"><p className="eyebrow">Медиа</p><h2>Библиотека</h2><p className="muted">Файл отправляется напрямую в MinIO. В курс можно добавить только готовое медиа.</p><div className="access-form"><select aria-label="Тип медиа" value={kind} onChange={(event) => { setKind(event.target.value as MediaAsset['kind']) }}><option value="image">Изображение</option><option value="audio">Аудио</option><option value="video">Видео</option></select><input aria-label="Файл медиа" type="file" accept={`${kind}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /><button className="primary-action" disabled={!file || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить и проверить</button></div>{upload.isPending && <p className="muted">Отправка файла...</p>}{status.data && <p className={status.data.status === 'ready' ? 'form-success' : status.data.status === 'rejected' ? 'form-error' : 'muted'}>Статус проверки: {status.data.status}{status.data.rejection_reason ? ` · ${status.data.rejection_reason}` : ''}</p>}<div className="media-list">{media.data?.map((asset) => <div className="media-row" key={asset.id}><span><strong>{asset.original_name}</strong><small>{asset.kind}</small></span><span className={`status status-${asset.status}`}>{asset.status}</span></div>)}</div><ErrorMessage error={upload.error ?? media.error} /></section>
+  const transferCopy = transferMode === 'proxy' ? 'Файл загружается через защищённый сервер платформы.' : transferMode === 'presigned' ? 'Файл загружается напрямую в объектное хранилище.' : 'Определяем режим передачи файла…'
+  return <section className="panel"><p className="eyebrow">Медиа</p><h2>Библиотека</h2><p className="muted">{transferCopy} В курс можно добавить только готовое медиа.</p><div className="access-form"><select aria-label="Тип медиа" value={kind} onChange={(event) => { setKind(event.target.value as MediaAsset['kind']) }}><option value="image">Изображение</option><option value="audio">Аудио</option><option value="video">Видео</option></select><input aria-label="Файл медиа" type="file" accept={`${kind}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /><button className="primary-action" disabled={!file || !transferMode || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить и проверить</button></div>{transferMode === undefined && <p className="muted">{configError ? 'Не удалось получить режим передачи медиа. Повторите попытку.' : 'Загрузка конфигурации сервера…'}</p>}{upload.isPending && <p className="muted">Отправка файла...</p>}{status.data && <p className={status.data.status === 'ready' ? 'form-success' : status.data.status === 'rejected' ? 'form-error' : 'muted'}>Статус проверки: {status.data.status}{status.data.rejection_reason ? ` · ${status.data.rejection_reason}` : ''}</p>}<div className="media-list">{media.data?.map((asset) => <div className="media-row" key={asset.id}><span><strong>{asset.original_name}</strong><small>{asset.kind}</small></span><span className={`status status-${asset.status}`}>{asset.status}</span></div>)}</div><ErrorMessage error={upload.error ?? media.error} /></section>
 }

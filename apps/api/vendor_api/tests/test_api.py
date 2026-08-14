@@ -79,6 +79,27 @@ def test_vendor_login_is_session_based_and_rate_limited(client: Client) -> None:
     assert client.get("/api/v1/vendor/me").status_code == 200
 
 
+def test_vendor_me_requires_active_vendor_membership(client: Client) -> None:
+    admin = User.objects.create_superuser("admin@example.com", PASSWORD)
+    client.force_login(admin)
+
+    response = client.get("/api/v1/vendor/me")
+
+    assert response.status_code == 403
+    assert response.json() == {"code": "VENDOR_ACCESS_REQUIRED"}
+
+
+def test_vendor_me_allows_owner_and_editor_of_active_vendor(client: Client) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    owner = member("owner@example.com", vendor, VendorMember.Role.OWNER)
+    editor = member("editor@example.com", vendor, VendorMember.Role.EDITOR)
+    for user in (owner, editor):
+        client.force_login(user)
+        response = client.get("/api/v1/vendor/me")
+        assert response.status_code == 200
+        assert response.json()["vendors"][0]["id"] == str(vendor.id)
+
+
 @override_settings(VENDOR_AUTH_RATE_LIMIT=1)
 def test_vendor_login_rate_limit_is_neutral(client: Client) -> None:
     client.defaults["REMOTE_ADDR"] = "192.0.2.10"
