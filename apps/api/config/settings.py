@@ -102,6 +102,10 @@ MEDIA_MAX_BYTES = {
 MEDIA_MAX_DURATION_SECONDS = int(os.getenv("MEDIA_MAX_DURATION_SECONDS", str(4 * 60 * 60)))
 MEDIA_FFPROBE_PATH = os.getenv("MEDIA_FFPROBE_PATH", "ffprobe")
 MEDIA_FFPROBE_TIMEOUT_SECONDS = int(os.getenv("MEDIA_FFPROBE_TIMEOUT_SECONDS", "30"))
+MEDIA_TRANSFER_MODE = os.getenv("MEDIA_TRANSFER_MODE", "proxy" if DEBUG else "presigned")
+if MEDIA_TRANSFER_MODE not in {"proxy", "presigned"}:
+    raise ValueError("MEDIA_TRANSFER_MODE must be proxy or presigned")
+FILE_UPLOAD_MAX_MEMORY_SIZE = 0
 
 AUTH_USER_MODEL = "accounts.User"
 AUTHENTICATION_BACKENDS = ["accounts.auth.BackofficeAuthenticationBackend"]

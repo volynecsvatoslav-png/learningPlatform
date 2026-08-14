@@ -194,3 +194,38 @@ def test_learner_media_url_is_no_store_and_object_key_is_not_returned(client: Cl
     assert response.status_code == 200
     assert response["Cache-Control"] == "no-store"
     assert "object_key" not in response.content.decode()
+
+
+def test_learner_proxy_content_is_enrollment_scoped_and_supports_range(client: Client) -> None:
+    learner, course, lesson, token = make_access()
+    asset = MediaAsset.objects.create(
+        vendor=course.vendor,
+        kind=MediaAsset.Kind.VIDEO,
+        status=MediaAsset.Status.READY,
+        bucket="bucket",
+        object_key="private/learner-video",
+        original_name="lesson.mp4",
+        content_type="video/mp4",
+        size_bytes=10,
+        sha256="0" * 64,
+        created_by=learner,
+    )
+    lesson.content_units.all().delete()
+    ContentUnit.objects.create(
+        lesson=lesson, type=ContentUnit.Type.VIDEO, position=1, media_asset=asset
+    )
+    publish_course(course)
+    session_login(client, token)
+    storage = Mock()
+    storage.head.return_value = {"ContentLength": 10}
+    storage.read_range.return_value = iter([b"234"])
+    with patch("media_assets.views.get_storage", return_value=storage):
+        response = client.get(
+            f"/api/v1/learner/courses/{course.id}/media/{asset.id}/content",
+            HTTP_RANGE="bytes=2-4",
+        )
+    assert response.status_code == 206
+    assert response["Content-Range"] == "bytes 2-4/10"
+    assert response["Cache-Control"] == "private, no-store"
+    assert response["Accept-Ranges"] == "bytes"
+    assert b"private/learner-video" not in b"".join(response.streaming_content)

@@ -3,8 +3,9 @@ import secrets
 import uuid
 from typing import Any, cast
 
+from django.conf import settings
 from django.contrib.auth import login, logout
-from django.http import Http404
+from django.http import Http404, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -29,6 +30,7 @@ from learner.serializers import LearnerProgressSerializer
 from learning.models import Course
 from media_assets.models import MediaAsset
 from media_assets.storage import get_storage
+from media_assets.views import serve_asset_content
 
 
 def _active_enrollment(user: User, course_id: uuid.UUID) -> Enrollment:
@@ -242,6 +244,32 @@ class LearnerStreamURLView(LearnerAPIView):
         ).first()
         if asset is None:
             raise Http404
-        response = Response({"url": get_storage().create_download_url(key=asset.object_key)})
+        url = (
+            f"/api/v1/learner/courses/{course_id}/media/{asset_id}/content"
+            if settings.MEDIA_TRANSFER_MODE == "proxy"
+            else get_storage().create_download_url(key=asset.object_key)
+        )
+        response = Response({"url": url})
         response["Cache-Control"] = "no-store"
         return response
+
+
+class LearnerMediaContentView(LearnerAPIView):
+    def get(
+        self, request: Request, course_id: uuid.UUID, asset_id: uuid.UUID
+    ) -> StreamingHttpResponse:
+        enrollment = _active_enrollment(_learner_user(request), course_id)
+        snapshot = _snapshot_course(enrollment)
+        asset_ids = {snapshot.get("cover_asset_id")}
+        for module in snapshot.get("modules", []):
+            for lesson in module.get("lessons", []):
+                for unit in lesson.get("content_units", []):
+                    asset_ids.add(unit.get("media_asset_id"))
+        if str(asset_id) not in asset_ids:
+            raise Http404
+        asset = MediaAsset.objects.filter(
+            pk=asset_id, vendor_id=enrollment.course.vendor_id, status=MediaAsset.Status.READY
+        ).first()
+        if asset is None:
+            raise Http404
+        return serve_asset_content(request, asset)

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { VendorPage } from './vendor-page'
+import { NewContent, VendorPage } from './vendor-page'
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -90,5 +90,54 @@ describe('VendorPage', () => {
       return url.includes('/courses?') && init?.method === 'POST'
     })
     expect(request).toBeDefined()
+  })
+
+  it('uploads a video in the editor, shows validation, and selects it when ready', async () => {
+    class FakeXHR {
+      upload = { onprogress: () => {} }
+      onerror: (() => void) | null = null
+      onload: (() => void) | null = null
+      status = 201
+      responseText = JSON.stringify({ id: 'video-1', status: 'uploaded', kind: 'video', original_name: 'lesson.mp4' })
+      open() { /* test transport */ }
+      setRequestHeader() { /* test transport */ }
+      send() {
+        this.onload?.()
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/api/v1/vendor/csrf')) return response({ csrfToken: 'csrf-token' })
+      if (url.endsWith('/api/v1/vendor/media/video-1')) return response({ id: 'video-1', status: 'ready', kind: 'video', original_name: 'lesson.mp4' })
+      return response({})
+    }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><NewContent lessonId="lesson-1" readyMedia={[]} act={vi.fn()} vendorId="vendor-1" transferMode="proxy" /></QueryClientProvider>)
+    fireEvent.change(screen.getByLabelText('Тип'), { target: { value: 'video' } })
+    fireEvent.change(screen.getByLabelText('Новый файл'), { target: { files: [new File(['video'], 'lesson.mp4', { type: 'video/mp4' })] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Загрузить новый файл' }))
+    expect(await screen.findByText('Файл готов и выбран.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Готовое медиа')).toHaveValue('video-1')
+  })
+
+  it('shows the backend upload error instead of a generic message', async () => {
+    class ErrorXHR {
+      upload = { onprogress: () => undefined }
+      onload: (() => void) | null = null
+      status = 400
+      responseText = JSON.stringify({ file: ['Unsupported file format.'] })
+      open() { /* test transport */ }
+      setRequestHeader() { /* test transport */ }
+      send() { this.onload?.() }
+    }
+    vi.stubGlobal('XMLHttpRequest', ErrorXHR)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ csrfToken: 'csrf-token' })))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><NewContent lessonId="lesson-1" readyMedia={[]} act={vi.fn()} vendorId="vendor-1" transferMode="proxy" /></QueryClientProvider>)
+    fireEvent.change(screen.getByLabelText('Тип'), { target: { value: 'video' } })
+    fireEvent.change(screen.getByLabelText('Новый файл'), { target: { files: [new File(['video'], 'lesson.txt', { type: 'text/plain' })] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Загрузить новый файл' }))
+    expect(await screen.findByText('Unsupported file format.')).toBeInTheDocument()
   })
 })

@@ -7,6 +7,7 @@ import {
   type Course,
   type Lesson,
   type MediaAsset,
+  type MediaTransferMode,
   type Module,
   type Vendor,
   type VendorMember,
@@ -17,9 +18,12 @@ type CourseStructure = { modules: Array<Module & { lessons: Array<Lesson & { con
 
 function ErrorMessage({ error }: { error: Error | null }) {
   if (!error) return null
-  const message = error instanceof ApiError && error.code === 'AUTH_RATE_LIMITED'
-    ? 'Слишком много попыток. Повторите позже.'
-    : 'Не удалось выполнить запрос.'
+  const body = error instanceof ApiError ? error.body : {}
+  const messages = Object.values(body).reduce<string[]>((result, value) => {
+    if (Array.isArray(value)) return result.concat(value.filter((item): item is string => typeof item === 'string'))
+    return result
+  }, [])
+  const message = error instanceof ApiError && error.code === 'AUTH_RATE_LIMITED' ? 'Слишком много попыток. Повторите позже.' : messages[0] ?? (error instanceof ApiError && error.code ? error.code : 'Не удалось выполнить запрос.')
   return <p className="form-error">{message}</p>
 }
 
@@ -90,12 +94,20 @@ function ContentEditor({ unit, lessonId, position, total, readyMedia, act }: {
   )
 }
 
-function NewContent({ lessonId, readyMedia, act }: { lessonId: string; readyMedia: MediaAsset[]; act: (data: StructureAction) => void }) {
+export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }: { lessonId: string; readyMedia: MediaAsset[]; act: (data: StructureAction) => void; vendorId: string; transferMode: MediaTransferMode }) {
   const [type, setType] = useState<ContentUnit['type']>('text')
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
   const [assetId, setAssetId] = useState('')
+  const [file, setFile] = useState<File | null>(null)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadedId, setUploadedId] = useState<string | null>(null)
+  const upload = useMutation({ mutationFn: () => vendorApi.uploadMedia(transferMode, vendorId, file as File, type as MediaAsset['kind'], setUploadProgress), onSuccess: (asset) => { setUploadedId(asset.id) } })
+  const uploadStatus = useQuery({ queryKey: ['editor-media-status', uploadedId], queryFn: () => vendorApi.mediaStatus(uploadedId as string), enabled: Boolean(uploadedId), refetchInterval: (query) => query.state.data?.status === 'ready' || query.state.data?.status === 'rejected' ? false : 1000 })
+  useEffect(() => { if (uploadStatus.data?.status === 'ready') setAssetId(uploadStatus.data.id) }, [uploadStatus.data])
   const media = readyMedia.filter((asset) => asset.kind === type)
+  const uploadedReady = uploadStatus.data?.status === 'ready' ? uploadStatus.data : null
+  const mediaOptions = uploadedReady?.kind === type && !media.some((asset) => asset.id === uploadedReady.id) ? [...media, uploadedReady] : media
   const canCreate = type === 'text' ? Boolean(text.trim()) : Boolean(assetId)
   return (
     <div className="new-content-form">
@@ -105,7 +117,7 @@ function NewContent({ lessonId, readyMedia, act }: { lessonId: string; readyMedi
         <label>Название<input value={title} onChange={(event) => { setTitle(event.target.value) }} /></label>
         {type === 'text'
           ? <label>Markdown<textarea value={text} onChange={(event) => { setText(event.target.value) }} /></label>
-          : <label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }}><option value="">Выберите файл</option>{media.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label>}
+          : <><label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }}><option value="">Выберите файл</option>{mediaOptions.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label><label>Новый файл<input type="file" accept={`${type}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /></label><button type="button" disabled={!file || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить новый файл</button>{upload.isPending && <progress max="100" value={uploadProgress}>{uploadProgress}%</progress>}{uploadStatus.data && <small>{uploadStatus.data.status === 'ready' ? 'Файл готов и выбран.' : `Проверка: ${uploadStatus.data.status}`}</small>}{upload.error && <><ErrorMessage error={upload.error} /><button type="button" onClick={() => { upload.reset(); upload.mutate() }}>Повторить загрузку</button></>}</>}
       </div>
       <button disabled={!canCreate} onClick={() => {
         const content = type === 'text' ? { type, text_markdown: text } : { type, media_asset_id: assetId }
@@ -116,13 +128,15 @@ function NewContent({ lessonId, readyMedia, act }: { lessonId: string; readyMedi
   )
 }
 
-function LessonEditor({ lesson, moduleId, position, total, readyMedia, act }: {
+function LessonEditor({ lesson, moduleId, position, total, readyMedia, act, vendorId, transferMode }: {
   lesson: Lesson & { content_units: ContentUnit[] }
   moduleId: string
   position: number
   total: number
   readyMedia: MediaAsset[]
   act: (data: StructureAction) => void
+  vendorId: string
+  transferMode: MediaTransferMode
 }) {
   const [open, setOpen] = useState(false)
   const [title, setTitle] = useState(lesson.title)
@@ -148,18 +162,20 @@ function LessonEditor({ lesson, moduleId, position, total, readyMedia, act }: {
         <h4>Контент урока</h4>
         {lesson.content_units.length === 0 && <p className="empty-state">Добавьте первый контент-блок.</p>}
         {lesson.content_units.map((unit, index) => <ContentEditor key={unit.id} unit={unit} lessonId={lesson.id} position={index + 1} total={lesson.content_units.length} readyMedia={readyMedia} act={act} />)}
-        <NewContent lessonId={lesson.id} readyMedia={readyMedia} act={act} />
+         <NewContent lessonId={lesson.id} readyMedia={readyMedia} act={act} vendorId={vendorId} transferMode={transferMode} />
       </div>}
     </div>
   )
 }
 
-function ModuleEditor({ module, position, total, readyMedia, act }: {
+function ModuleEditor({ module, position, total, readyMedia, act, vendorId, transferMode }: {
   module: CourseStructure['modules'][number]
   position: number
   total: number
   readyMedia: MediaAsset[]
   act: (data: StructureAction) => void
+  vendorId: string
+  transferMode: MediaTransferMode
 }) {
   const [title, setTitle] = useState(module.title)
   const [description, setDescription] = useState(module.description)
@@ -178,7 +194,7 @@ function ModuleEditor({ module, position, total, readyMedia, act }: {
         <button className="danger-button" onClick={() => { act({ entity: 'module', action: 'delete', id: module.id }) }}>Удалить модуль</button>
       </div>
       <div className="lesson-list">
-        {module.lessons.map((lesson, index) => <LessonEditor key={lesson.id} lesson={lesson} moduleId={module.id} position={index + 1} total={module.lessons.length} readyMedia={readyMedia} act={act} />)}
+         {module.lessons.map((lesson, index) => <LessonEditor key={lesson.id} lesson={lesson} moduleId={module.id} position={index + 1} total={module.lessons.length} readyMedia={readyMedia} act={act} vendorId={vendorId} transferMode={transferMode} />)}
       </div>
       <div className="inline-form"><input aria-label={`Новый урок в ${module.title}`} placeholder="Новый урок" value={lessonTitle} onChange={(event) => { setLessonTitle(event.target.value) }} /><button disabled={!lessonTitle.trim()} onClick={() => { act({ entity: 'lesson', action: 'create', parent_id: module.id, title: lessonTitle, is_published: false }); setLessonTitle('') }}>Добавить урок</button></div>
     </div>
@@ -210,7 +226,7 @@ function PublishedPreview({ snapshot, media }: { snapshot: Awaited<ReturnType<ty
   )
 }
 
-function CourseEditor({ vendor, course, onClose }: { vendor: Vendor; course: Course | null; onClose: () => void }) {
+function CourseEditor({ vendor, course, onClose, transferMode }: { vendor: Vendor; course: Course | null; onClose: () => void; transferMode: MediaTransferMode }) {
   const queryClient = useQueryClient()
   const [title, setTitle] = useState(course?.title ?? '')
   const [slug, setSlug] = useState(course?.slug ?? '')
@@ -243,7 +259,7 @@ function CourseEditor({ vendor, course, onClose }: { vendor: Vendor; course: Cou
           <button className="primary-action" type="submit" disabled={save.isPending}>Сохранить курс</button>
         </form>
         {id && <>
-          <div className="subsection"><div className="panel-heading"><div><p className="eyebrow">Структура</p><h3>Модули и уроки</h3></div><span className="status">{structure.data?.modules.length ?? 0} модулей</span></div><div className="inline-form"><input aria-label="Название нового модуля" placeholder="Новый модуль" value={moduleTitle} onChange={(event) => { setModuleTitle(event.target.value) }} /><button disabled={!moduleTitle.trim()} onClick={() => { action.mutate({ entity: 'module', action: 'create', title: moduleTitle }); setModuleTitle('') }}>Добавить модуль</button></div>{structure.isLoading && <p className="muted">Загрузка структуры...</p>}{structure.data?.modules.map((module, index) => <ModuleEditor key={module.id} module={module} position={index + 1} total={structure.data.modules.length} readyMedia={readyMedia} act={(data) => { action.mutate(data) }} />)}</div>
+           <div className="subsection"><div className="panel-heading"><div><p className="eyebrow">Структура</p><h3>Модули и уроки</h3></div><span className="status">{structure.data?.modules.length ?? 0} модулей</span></div><div className="inline-form"><input aria-label="Название нового модуля" placeholder="Новый модуль" value={moduleTitle} onChange={(event) => { setModuleTitle(event.target.value) }} /><button disabled={!moduleTitle.trim()} onClick={() => { action.mutate({ entity: 'module', action: 'create', title: moduleTitle }); setModuleTitle('') }}>Добавить модуль</button></div>{structure.isLoading && <p className="muted">Загрузка структуры...</p>}{structure.data?.modules.map((module, index) => <ModuleEditor key={module.id} module={module} position={index + 1} total={structure.data.modules.length} readyMedia={readyMedia} act={(data) => { action.mutate(data) }} vendorId={vendor.id} transferMode={transferMode} />)}</div>
           <div className="item-actions course-actions"><button className="primary-action" onClick={() => { publish.mutate() }}>Опубликовать ревизию →</button><button onClick={() => { preview.mutate() }}>Показать опубликованную версию</button><button className="danger-button" onClick={() => { archive.mutate() }}>Архивировать</button></div>
           {preview.data && <PublishedPreview snapshot={preview.data} media={readyMedia} />}
         </>}
@@ -259,6 +275,7 @@ export function VendorPage() {
   const [vendor, setVendor] = useState<Vendor | null>(null)
   const queryClient = useQueryClient()
   const me = useQuery({ queryKey: ['vendor-me'], queryFn: vendorApi.me, enabled: !loggedOut })
+  const transfer = useQuery({ queryKey: ['media-transfer-config'], queryFn: vendorApi.mediaConfig, enabled: !loggedOut })
   const activeVendor = vendor ?? me.data?.vendors[0] ?? null
   const courses = useQuery({ queryKey: ['courses', activeVendor?.id], queryFn: () => vendorApi.courses(activeVendor?.id ?? ''), enabled: Boolean(activeVendor) })
   const accesses = useQuery({ queryKey: ['access', activeVendor?.id], queryFn: () => vendorApi.accesses(activeVendor?.id ?? ''), enabled: activeVendor?.role === 'owner' })
@@ -267,14 +284,14 @@ export function VendorPage() {
   if (loggedOut || authError) return <Login onLogin={() => { setLoggedOut(false); void queryClient.invalidateQueries({ queryKey: ['vendor-me'] }) }} />
   if (me.isLoading) return <main className="loading-screen">Загрузка кабинета...</main>
   if (me.isError || !activeVendor) return <main className="state-screen"><h1>Кабинет недоступен</h1><p>Не удалось восстановить сессию. Повторите попытку позже.</p></main>
-  if (selected !== undefined) return <CourseEditor vendor={activeVendor} course={selected} onClose={() => { setSelected(undefined) }} />
+  if (selected !== undefined) return <CourseEditor vendor={activeVendor} course={selected} transferMode={transfer.data?.mode ?? 'proxy'} onClose={() => { setSelected(undefined) }} />
   const vendors = me.data?.vendors ?? []
   return (
     <main className="workspace">
       <header className="workspace-header"><div><p className="eyebrow">Кабинет вендора</p><h1>{activeVendor.name}</h1>{vendors.length > 1 && <select aria-label="Вендор" value={activeVendor.id} onChange={(event) => { setVendor(vendors.find((item) => item.id === event.target.value) ?? null) }}>{vendors.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}</div><button className="text-button" onClick={() => { logout.mutate() }}>Выйти</button></header>
       <div className="workspace-grid">
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Каталог</p><h2>Ваши курсы</h2></div><button className="primary-action" onClick={() => { setSelected(null) }}>Новый курс +</button></div>{courses.isLoading && <p className="muted">Загрузка курсов...</p>}{courses.isError && <p className="form-error">Курсы не загрузились.</p>}{courses.data?.length === 0 && <p className="empty-state">Курсов пока нет. Создайте первый маршрут обучения.</p>}<div className="course-list">{courses.data?.map((course) => <button className="course-row" key={course.id} onClick={() => { setSelected(course) }}><span><strong>{course.title}</strong><small>{course.short_description || 'Без описания'}</small></span><span className={`status status-${course.status}`}>{course.status} · rev {course.published_revision ?? '—'}</span></button>)}</div></section>
-        <MediaPanel vendor={activeVendor} />
+         <MediaPanel vendor={activeVendor} transferMode={transfer.data?.mode ?? 'proxy'} />
         {activeVendor.role === 'owner' && <AccessPanel vendor={activeVendor} accesses={accesses.data ?? []} />}
         {activeVendor.role === 'owner' && <MembersPanel vendor={activeVendor} />}
       </div>
@@ -303,13 +320,13 @@ function MembersPanel({ vendor }: { vendor: Vendor }) {
   return <section className="panel"><p className="eyebrow">Команда</p><h2>Редакторы</h2><p className="muted">Владельцы могут создать только учетную запись редактора.</p><form className="access-form" onSubmit={(event) => { event.preventDefault(); create.mutate() }}><label>Email редактора<input type="email" value={email} onChange={(event) => { setEmail(event.target.value) }} required /></label><label>Временный пароль<input type="password" minLength={15} value={password} onChange={(event) => { setPassword(event.target.value) }} required /></label><button className="primary-action" type="submit">Создать редактора</button></form>{members.data?.map((member: VendorMember) => <div className="access-row" key={member.id}><span><strong>{member.email}</strong><small>{member.role}</small></span>{member.role === 'editor' && <button className="danger-button" onClick={() => { remove.mutate(member.id) }}>Удалить</button>}</div>)}<ErrorMessage error={create.error ?? remove.error} /></section>
 }
 
-function MediaPanel({ vendor }: { vendor: Vendor }) {
+function MediaPanel({ vendor, transferMode }: { vendor: Vendor; transferMode: MediaTransferMode }) {
   const [kind, setKind] = useState<MediaAsset['kind']>('image')
   const [file, setFile] = useState<File | null>(null)
   const [assetId, setAssetId] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const media = useQuery({ queryKey: ['vendor-media', vendor.id], queryFn: () => vendorApi.media(vendor.id) })
-  const upload = useMutation({ mutationFn: () => vendorApi.uploadMedia(vendor.id, file as File, kind), onSuccess: (asset) => { setAssetId(asset.id); setFile(null); void queryClient.invalidateQueries({ queryKey: ['vendor-media', vendor.id] }) } })
+  const upload = useMutation({ mutationFn: () => vendorApi.uploadMedia(transferMode, vendor.id, file as File, kind), onSuccess: (asset) => { setAssetId(asset.id); setFile(null); void queryClient.invalidateQueries({ queryKey: ['vendor-media', vendor.id] }) } })
   const status = useQuery({ queryKey: ['vendor-media-status', assetId], queryFn: () => vendorApi.mediaStatus(assetId as string), enabled: Boolean(assetId), refetchInterval: (query) => query.state.data?.status === 'ready' || query.state.data?.status === 'rejected' ? false : 1500 })
   useEffect(() => {
     if (status.data?.status === 'ready' || status.data?.status === 'rejected') void queryClient.invalidateQueries({ queryKey: ['vendor-media', vendor.id] })

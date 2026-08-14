@@ -10,15 +10,19 @@ from learner.views import (
     LearnerCourseListView,
     LearnerCsrfView,
     LearnerLogoutView,
+    LearnerMediaContentView,
     LearnerProgressView,
     LearnerSessionView,
     LearnerStreamURLView,
 )
 from media_assets.views import (
     MediaStatusView,
+    MediaTransferConfigView,
+    ProxyUploadView,
     StreamURLView,
     UploadCompleteView,
     UploadCreateView,
+    VendorMediaContentView,
 )
 from vendor_api.views import (
     VendorAccessGrantView,
@@ -61,6 +65,14 @@ urlpatterns = [
         name="media-stream-url",
     ),
     path("api/v1/vendor/csrf", VendorCsrfView.as_view(), name="vendor-csrf"),
+    path(
+        "api/v1/vendor/media/config", MediaTransferConfigView.as_view(), name="vendor-media-config"
+    ),
+    path(
+        "api/v1/vendor/media/upload-file",
+        ProxyUploadView.as_view(),
+        name="vendor-media-upload-file",
+    ),
     path("api/v1/vendor/auth/login", VendorAuthView.as_view(), name="vendor-login"),
     path("api/v1/vendor/auth/logout", VendorLogoutView.as_view(), name="vendor-logout"),
     path(
@@ -138,6 +150,11 @@ urlpatterns = [
         MediaStatusView.as_view(),
         name="vendor-media-status",
     ),
+    path(
+        "api/v1/vendor/media/<uuid:asset_id>/content",
+        VendorMediaContentView.as_view(),
+        name="vendor-media-content",
+    ),
     path("api/v1/learner/access/<str:token>", AccessLinkView.as_view(), name="learner-access"),
     path("api/v1/learner/csrf", LearnerCsrfView.as_view(), name="learner-csrf"),
     path("api/v1/learner/session", LearnerSessionView.as_view(), name="learner-session"),
@@ -162,6 +179,11 @@ urlpatterns = [
         "api/v1/learner/courses/<uuid:course_id>/media/<uuid:asset_id>/stream-url",
         LearnerStreamURLView.as_view(),
         name="learner-stream-url",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/media/<uuid:asset_id>/content",
+        LearnerMediaContentView.as_view(),
+        name="learner-media-content",
     ),
     path(
         "backoffice/password_reset/",

@@ -22,6 +22,10 @@ class ObjectStorage(Protocol):
 
     def read(self, *, key: str) -> Iterator[bytes]: ...
 
+    def read_range(self, *, key: str, start: int, end: int | None = None) -> Iterator[bytes]: ...
+
+    def upload_fileobj(self, *, key: str, fileobj: Any, content_type: str) -> None: ...
+
     def create_download_url(self, *, key: str) -> str: ...
 
     def delete(self, *, key: str) -> None: ...
@@ -37,6 +41,8 @@ class S3Client(Protocol):
     def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
 
     def get_object(self, **kwargs: Any) -> dict[str, S3Body]: ...
+
+    def upload_fileobj(self, fileobj: Any, bucket: str, key: str, **kwargs: Any) -> None: ...
 
     def generate_presigned_url(self, *args: Any, **kwargs: Any) -> str: ...
 
@@ -118,6 +124,22 @@ class S3ObjectStorage:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         body = response["Body"]
         yield from body.iter_chunks(chunk_size=1024 * 1024)
+
+    def read_range(self, *, key: str, start: int, end: int | None = None) -> Iterator[bytes]:
+        body = self.client.get_object(
+            Bucket=self.bucket,
+            Key=key,
+            Range=f"bytes={start}-{'' if end is None else end}",
+        )["Body"]
+        yield from body.iter_chunks(chunk_size=1024 * 1024)
+
+    def upload_fileobj(self, *, key: str, fileobj: Any, content_type: str) -> None:
+        self.client.upload_fileobj(
+            fileobj,
+            self.bucket,
+            key,
+            ExtraArgs={"ContentType": content_type, "ServerSideEncryption": "AES256"},
+        )
 
     def create_download_url(self, *, key: str) -> str:
         return self.presign_client.generate_presigned_url(

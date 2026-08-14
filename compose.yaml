@@ -7,7 +7,6 @@ x-api: &api
     APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8000}
     DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-development-secret-change-before-deployment}
     DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
-    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,api}
     DJANGO_SECURE_COOKIES: ${DJANGO_SECURE_COOKIES:-false}
     DJANGO_SECURE_SSL_REDIRECT: ${DJANGO_SECURE_SSL_REDIRECT:-false}
     DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173,http://127.0.0.1:8000}
@@ -21,6 +20,8 @@ x-api: &api
     S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minio-local-secret}
     S3_USE_SSL: ${S3_USE_SSL:-false}
     S3_CHECKSUM_POLICY_SUPPORTED: ${S3_CHECKSUM_POLICY_SUPPORTED:-false}
+    MEDIA_TRANSFER_MODE: ${MEDIA_TRANSFER_MODE:-proxy}
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,api}
     SMTP_HOST: mailpit
     SMTP_PORT: 1025
     EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
@@ -135,6 +136,7 @@ services:
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minio-local-secret}
       S3_USE_SSL: ${S3_USE_SSL:-false}
       S3_CHECKSUM_POLICY_SUPPORTED: ${S3_CHECKSUM_POLICY_SUPPORTED:-false}
+      MEDIA_TRANSFER_MODE: ${MEDIA_TRANSFER_MODE:-proxy}
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
       EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
@@ -149,6 +151,8 @@ services:
   frontend:
     build:
       context: ./apps/web
+    environment:
+      VITE_ALLOWED_HOSTS: ${VITE_ALLOWED_HOSTS:-localhost,127.0.0.1}
     ports:
       - "5173:5173"
     depends_on:

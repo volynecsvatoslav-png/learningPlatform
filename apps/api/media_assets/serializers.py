@@ -1,7 +1,9 @@
 import re
 from pathlib import Path
+from typing import cast
 
 from django.conf import settings
+from django.core.files.uploadedfile import UploadedFile
 from rest_framework import serializers
 
 from media_assets.models import MediaAsset
@@ -51,6 +53,29 @@ class UploadRequestSerializer(serializers.Serializer[dict[str, object]]):
             raise serializers.ValidationError(
                 {"content_type": "Content type is not allowed for this media type."}
             )
+        return attrs
+
+
+class ProxyUploadSerializer(serializers.Serializer[dict[str, object]]):
+    vendor_id = serializers.UUIDField()
+    kind = serializers.ChoiceField(choices=MediaAsset.Kind.values)
+    file = serializers.FileField(allow_empty_file=False)
+
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        file = cast(UploadedFile, attrs["file"])
+        kind = cast(str, attrs["kind"])
+        name = str(file.name)
+        if name != Path(name).name or "/" in name or "\\" in name:
+            raise serializers.ValidationError({"file": "Path separators are not allowed."})
+        if Path(name).suffix.lower() not in ALLOWED_EXTENSIONS[kind]:
+            raise serializers.ValidationError({"file": "Unsupported file format."})
+        if str(file.content_type or "").lower() not in ALLOWED_CONTENT_TYPES[kind]:
+            raise serializers.ValidationError({"file": "Invalid MIME type."})
+        size = int(file.size or 0)
+        if size <= 0:
+            raise serializers.ValidationError({"file": "File must not be empty."})
+        if size > settings.MEDIA_MAX_BYTES[kind]:
+            raise serializers.ValidationError({"file": "File exceeds the maximum size."})
         return attrs
 
 

@@ -35,19 +35,31 @@ docker compose exec api python manage.py createsuperuser
 
 Миграции применяются контейнером API автоматически. Bucket MinIO создаётся приватным сервисом `minio-init`.
 
+### Передача медиа
+
+`MEDIA_TRANSFER_MODE=proxy` используется по умолчанию в DEBUG и безопасен для туннелей: браузер отправляет multipart в Django, а просмотр идёт через same-origin URL с поддержкой Range. Для production по умолчанию используется `presigned`, где браузер загружает файл напрямую в S3/MinIO. Режим можно явно задать как `proxy` или `presigned`.
+
+Для внешнего туннеля укажите только его конкретный домен, не wildcard:
+
+```dotenv
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,example-tunnel.example
+VITE_ALLOWED_HOSTS=localhost,127.0.0.1,example-tunnel.example
+DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,https://example-tunnel.example
+```
+
 ## Кабинет вендора
 
 1. Создайте platform admin и через `/backoffice/` создайте Vendor, подтверждённого пользователя и VendorMember с ролью `owner` или `editor`.
 2. Войдите на `/vendor/` по email и паролю. Обычный owner/editor получает только vendor API и не имеет доступа к Django admin.
 3. Создайте курс, модуль, урок и Markdown content unit. Публикация доступна только после опубликованного урока с валидным контентом.
-4. Для image/audio/video используйте `/api/v1/vendor/media/uploads`: presigned POST отправляется браузером напрямую в приватный MinIO; asset можно прикрепить только после статуса `ready`.
+4. Для image/audio/video используйте библиотеку медиа. В proxy mode кнопка «Загрузить новый файл» отправляет multipart через Django и показывает прогресс; в presigned mode сохраняется прямая загрузка через presigned POST. Asset можно прикрепить только после статуса `ready`.
 5. Owner откройте блок «Ученики», выберите опубликованный курс, укажите email и выдайте доступ. Editor не видит и не может изменять members/enrollments.
 
 ## Кабинет ученика
 
 1. После выдачи доступа письмо появляется в Mailpit: <http://localhost:8025>. Ссылка имеет не менее 256 бит случайности; в БД хранится только HMAC-хеш.
 2. Откройте ссылку в `/app/access/<token>`, подтвердите вход и просматривайте только выданный опубликованный snapshot курса.
-3. Markdown, image, audio и video открываются через learner-scoped короткий signed URL с `Cache-Control: no-store`. `object_key` в frontend не передаётся.
+3. Markdown, image, audio и video открываются через learner-scoped URL с `Cache-Control: private, no-store` и `Accept-Ranges: bytes`. В proxy mode URL остаётся same-origin; в presigned mode используется короткий signed URL. `object_key` в frontend не передаётся.
 4. Нажмите «Отметить урок завершённым». Прогресс сохраняется на сервере.
 5. Откройте ту же ссылку во втором browser context. Первая сессия при следующем API-запросе получает `SESSION_REVOKED` и показывает «Сессия открыта на другом устройстве»; второй context продолжает работать.
 

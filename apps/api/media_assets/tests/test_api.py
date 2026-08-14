@@ -2,11 +2,13 @@ import hashlib
 from unittest.mock import Mock, patch
 
 import pytest
-from django.test import Client
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client, override_settings
 from django.utils import timezone
 
 from accounts.models import User
 from media_assets.models import MediaAsset
+from media_assets.serializers import ProxyUploadSerializer
 from vendors.models import Vendor, VendorMember
 
 pytestmark = pytest.mark.django_db
@@ -117,6 +119,7 @@ def test_foreign_asset_returns_404_and_anonymous_stream_is_rejected(client: Clie
     assert client.get(f"/api/v1/media/{asset.id}/stream-url").status_code == 403
 
 
+@override_settings(MEDIA_TRANSFER_MODE="presigned")
 def test_stream_url_is_no_store_and_never_exposes_object_key(client: Client) -> None:
     vendor = Vendor.objects.create(name="Alpha", slug="alpha")
     user = owner("owner@example.com", vendor)
@@ -144,6 +147,28 @@ def test_stream_url_is_no_store_and_never_exposes_object_key(client: Client) -> 
     assert response.json() == {"url": "http://minio/signed"}
 
 
+def test_proxy_stream_url_is_same_origin(client: Client) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    user = owner("owner@example.com", vendor)
+    asset = MediaAsset.objects.create(
+        vendor=vendor,
+        kind="image",
+        bucket="bucket",
+        object_key="private/random-key",
+        original_name="cover.png",
+        content_type="image/png",
+        size_bytes=4,
+        sha256=hashlib.sha256(b"test").hexdigest(),
+        created_by=user,
+        status=MediaAsset.Status.READY,
+    )
+    client.force_login(user)
+    with patch("media_assets.views.get_storage"):
+        response = client.get(f"/api/v1/media/{asset.id}/stream-url")
+    assert response.status_code == 200
+    assert response.json() == {"url": f"/api/v1/vendor/media/{asset.id}/content"}
+
+
 def test_completion_queues_validation_once(client: Client) -> None:
     vendor = Vendor.objects.create(name="Alpha", slug="alpha")
     user = owner("owner@example.com", vendor)
@@ -167,3 +192,86 @@ def test_completion_queues_validation_once(client: Client) -> None:
     asset.refresh_from_db()
     assert asset.status == MediaAsset.Status.UPLOADED
     delay.assert_called_once_with(str(asset.id))
+
+
+def test_proxy_upload_streams_file_and_queues_validation(client: Client) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    user = owner("owner@example.com", vendor)
+    client.force_login(user)
+    storage = Mock()
+    payload = b"proxy-video-bytes"
+    upload = SimpleUploadedFile("lesson.mp4", payload, content_type="video/mp4")
+    with (
+        patch("media_assets.views.get_storage", return_value=storage),
+        patch("media_assets.views.validate_media_asset.delay") as delay,
+    ):
+        response = client.post(
+            "/api/v1/vendor/media/upload-file",
+            {"vendor_id": str(vendor.id), "kind": "video", "file": upload},
+        )
+    assert response.status_code == 201
+    asset = MediaAsset.objects.get()
+    assert asset.status == MediaAsset.Status.UPLOADED
+    assert asset.original_name == "lesson.mp4"
+    assert str(vendor.id) in asset.object_key
+    assert "lesson.mp4" not in asset.object_key
+    storage.upload_fileobj.assert_called_once()
+    delay.assert_called_once_with(str(asset.id))
+
+
+def test_proxy_upload_rejects_foreign_vendor_and_invalid_file(client: Client) -> None:
+    alpha = Vendor.objects.create(name="Alpha", slug="alpha")
+    beta = Vendor.objects.create(name="Beta", slug="beta")
+    client.force_login(owner("alpha@example.com", alpha))
+    foreign = SimpleUploadedFile("ok.mp4", b"x", content_type="video/mp4")
+    assert (
+        client.post(
+            "/api/v1/vendor/media/upload-file",
+            {"vendor_id": str(beta.id), "kind": "video", "file": foreign},
+        ).status_code
+        == 404
+    )
+    traversal = SimpleUploadedFile("evil.mp4", b"x", content_type="video/mp4")
+    traversal._name = "../evil.mp4"
+    serializer = ProxyUploadSerializer(
+        data={"vendor_id": str(alpha.id), "kind": "video", "file": traversal}
+    )
+    assert not serializer.is_valid()
+    assert "file" in serializer.errors
+    bad_type = SimpleUploadedFile("photo.png", b"x", content_type="text/plain")
+    assert (
+        client.post(
+            "/api/v1/vendor/media/upload-file",
+            {"vendor_id": str(alpha.id), "kind": "image", "file": bad_type},
+        ).status_code
+        == 400
+    )
+
+
+def test_proxy_content_supports_range_and_is_private(client: Client) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    user = owner("owner@example.com", vendor)
+    asset = MediaAsset.objects.create(
+        vendor=vendor,
+        kind="video",
+        bucket="bucket",
+        object_key="private/random-key",
+        original_name="lesson.mp4",
+        content_type="video/mp4",
+        size_bytes=10,
+        sha256=hashlib.sha256(b"0123456789").hexdigest(),
+        created_by=user,
+        status=MediaAsset.Status.READY,
+    )
+    client.force_login(user)
+    storage = Mock()
+    storage.head.return_value = {"ContentLength": 10}
+    storage.read_range.return_value = iter([b"234"])
+    with patch("media_assets.views.get_storage", return_value=storage):
+        response = client.get(f"/api/v1/vendor/media/{asset.id}/content", HTTP_RANGE="bytes=2-4")
+    assert response.status_code == 206
+    assert response["Content-Range"] == "bytes 2-4/10"
+    assert response["Content-Length"] == "3"
+    assert response["Accept-Ranges"] == "bytes"
+    assert response["Cache-Control"] == "private, no-store"
+    assert b"private/random-key" not in b"".join(response.streaming_content)

@@ -69,32 +69,35 @@ export type LearnerProgress = {
   completed_at: string | null
   updated_at: string
 }
+export type MediaTransferMode = 'proxy' | 'presigned'
 
 let csrfToken = ''
 
 export class ApiError extends Error {
   status: number
   code?: string
+  body: Record<string, unknown>
 
-  constructor(status: number, code?: string) {
+  constructor(status: number, code?: string, body: Record<string, unknown> = {}) {
     super(code ?? `HTTP ${String(status)}`)
     this.status = status
     this.code = code
+    this.body = body
   }
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('Accept', 'application/json')
-  if (options.body) headers.set('Content-Type', 'application/json')
+  if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (options.method && options.method !== 'GET') {
     if (!csrfToken) await csrf()
     headers.set('X-CSRFToken', csrfToken)
   }
   const response = await fetch(path, { ...options, credentials: 'include', headers })
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { code?: string }
-    throw new ApiError(response.status, body.code)
+    const body = (await response.json().catch(() => ({}))) as Record<string, unknown> & { code?: string }
+    throw new ApiError(response.status, body.code, body)
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
@@ -108,6 +111,7 @@ export async function csrf(): Promise<string> {
 }
 
 export const vendorApi = {
+  mediaConfig: () => request<{ mode: MediaTransferMode }>('/api/v1/vendor/media/config'),
   login: async (email: string, password: string) => {
     const result = await request<{ ok: true }>('/api/v1/vendor/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
     csrfToken = ''
@@ -133,7 +137,28 @@ export const vendorApi = {
   members: (vendorId: string) => request<VendorMember[]>(`/api/v1/vendor/members?vendor_id=${encodeURIComponent(vendorId)}`),
   createEditor: (vendorId: string, email: string, password: string) => request<VendorMember>('/api/v1/vendor/members', { method: 'POST', body: JSON.stringify({ vendor_id: vendorId, email, password, role: 'editor' }) }),
   deleteMember: (id: string) => request<undefined>(`/api/v1/vendor/members/${id}`, { method: 'DELETE' }),
-  uploadMedia: async (vendorId: string, file: File, kind: MediaAsset['kind']) => {
+  uploadMedia: async (mode: MediaTransferMode, vendorId: string, file: File, kind: MediaAsset['kind'], onProgress?: (value: number) => void) => {
+    if (mode === 'proxy') {
+      if (!csrfToken) await csrf()
+      return new Promise<MediaAsset>((resolve, reject) => {
+        const form = new FormData()
+        form.append('vendor_id', vendorId)
+        form.append('kind', kind)
+        form.append('file', file)
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/v1/vendor/media/upload-file')
+        xhr.withCredentials = true
+        xhr.setRequestHeader('X-CSRFToken', csrfToken)
+        xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100)) }
+        xhr.onerror = () => { reject(new ApiError(0, 'NETWORK_ERROR')) }
+        xhr.onload = () => {
+          const body = JSON.parse(xhr.responseText || '{}') as Record<string, unknown> & { code?: string }
+          if (xhr.status >= 200 && xhr.status < 300) resolve(body as unknown as MediaAsset)
+          else reject(new ApiError(xhr.status, body.code, body))
+        }
+        xhr.send(form)
+      })
+    }
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
     const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
     const created = await request<{ asset: MediaAsset; upload: { url: string; fields: Record<string, string> } }>('/api/v1/vendor/media/uploads', {
