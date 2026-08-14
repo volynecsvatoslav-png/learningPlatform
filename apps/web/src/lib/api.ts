@@ -156,13 +156,18 @@ export const vendorApi = {
         xhr.ontimeout = () => { networkError('UPLOAD_TIMEOUT') }
         xhr.onabort = () => { networkError('UPLOAD_ABORTED') }
         xhr.onload = () => {
-          let body: Record<string, unknown> & { code?: string }
+          let parsed: unknown
           try {
-            body = JSON.parse(xhr.responseText || '{}') as Record<string, unknown> & { code?: string }
+            parsed = JSON.parse(xhr.responseText) as unknown
           } catch {
             reject(new ApiError(xhr.status, undefined, {}, 'Сервер вернул некорректный ответ.'))
             return
           }
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            reject(new ApiError(xhr.status, undefined, {}, 'Сервер вернул некорректный ответ.'))
+            return
+          }
+          const body = parsed as Record<string, unknown> & { code?: string }
           if (xhr.status >= 200 && xhr.status < 300) resolve(body as unknown as MediaAsset)
           else reject(new ApiError(xhr.status, body.code, body))
         }

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { NewContent, VendorPage } from './vendor-page'
-import { ApiError, vendorApi } from '../lib/api'
+import { vendorApi } from '../lib/api'
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -80,6 +80,21 @@ describe('VendorPage', () => {
     await screen.findByRole('heading', { name: 'Alpha' })
     expect(screen.getByRole('button', { name: 'Загрузить и проверить' })).toBeDisabled()
     expect(screen.getByText('Не удалось получить режим передачи медиа. Повторите попытку.')).toBeInTheDocument()
+  })
+
+  it('keeps media upload disabled while transfer config is loading', async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/api/v1/vendor/me')) return response({ email: 'owner@example.com', vendors: [{ id: 'vendor-1', name: 'Alpha', role: 'owner' }] })
+      if (url.endsWith('/api/v1/vendor/media/config')) return new Promise<Response>(() => {})
+      return workspaceResponse(url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+    await screen.findByRole('heading', { name: 'Alpha' })
+    fireEvent.change(screen.getByLabelText('Файл медиа'), { target: { files: [new File(['video'], 'lesson.mp4', { type: 'video/mp4' })] } })
+    expect(screen.getByRole('button', { name: 'Загрузить и проверить' })).toBeDisabled()
+    expect(screen.getByText('Загрузка конфигурации сервера…')).toBeInTheDocument()
   })
 
   it('creates a course from a restored session', async () => {
@@ -161,7 +176,7 @@ describe('VendorPage', () => {
       upload = { onprogress: () => {} }
       onload: (() => void) | null = null
       status = 502
-      responseText = '<html>bad gateway</html>'
+      responseText = ''
       open() {}
       setRequestHeader() {}
       send() { this.onload?.() }
@@ -172,18 +187,25 @@ describe('VendorPage', () => {
     await expect(result).rejects.toMatchObject({ status: 502, message: 'Сервер вернул некорректный ответ.' })
   })
 
-  it('rejects aborted and network-failed uploads', async () => {
-    class AbortXHR {
+  it.each(['network', 'abort'] as const)('shows an upload error after an XHR %s event', async (failure) => {
+    class FailedXHR {
       upload = { onprogress: () => {} }
+      onerror: (() => void) | null = null
       onabort: (() => void) | null = null
       open() {}
       setRequestHeader() {}
-      send() { this.onabort?.() }
+      send() {
+        if (failure === 'network') this.onerror?.()
+        else this.onabort?.()
+      }
     }
-    vi.stubGlobal('XMLHttpRequest', AbortXHR)
+    vi.stubGlobal('XMLHttpRequest', FailedXHR)
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ csrfToken: 'csrf-token' })))
-    const result = vendorApi.uploadMedia('proxy', 'vendor-1', new File(['video'], 'lesson.mp4', { type: 'video/mp4' }), 'video')
-    await expect(result).rejects.toMatchObject({ status: 0 })
-    await expect(result).rejects.toBeInstanceOf(ApiError)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><NewContent lessonId="lesson-1" readyMedia={[]} act={vi.fn()} vendorId="vendor-1" transferMode="proxy" /></QueryClientProvider>)
+    fireEvent.change(screen.getByLabelText('Тип'), { target: { value: 'video' } })
+    fireEvent.change(screen.getByLabelText('Новый файл'), { target: { files: [new File(['video'], 'lesson.mp4', { type: 'video/mp4' })] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Загрузить новый файл' }))
+    expect(await screen.findByText('Не удалось передать файл. Проверьте соединение и повторите попытку.')).toBeInTheDocument()
   })
 })
