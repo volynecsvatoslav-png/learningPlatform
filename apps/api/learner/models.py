@@ -14,6 +14,12 @@ def hash_access_token(token: str) -> str:
     return hmac.new(settings.SECRET_KEY.encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
+def hash_pwa_transfer_code(code: str) -> str:
+    return hmac.new(
+        settings.PWA_TRANSFER_PEPPER.encode(), code.encode(), hashlib.sha256
+    ).hexdigest()
+
+
 class Enrollment(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "active", "Активен"
@@ -64,6 +70,37 @@ class LearnerSession(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("learner",),
+                condition=models.Q(revoked_at__isnull=True),
+                name="learner_one_active_session",
+            )
+        ]
+
+
+class PwaSessionTransfer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    learner = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="pwa_session_transfers"
+    )
+    source_session = models.ForeignKey(
+        LearnerSession, on_delete=models.CASCADE, related_name="pwa_transfers"
+    )
+    code_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(
+                fields=("learner", "used_at", "expires_at"),
+                name="pwa_transfer_active_idx",
+            )
+        ]
 
 
 class LessonProgress(models.Model):

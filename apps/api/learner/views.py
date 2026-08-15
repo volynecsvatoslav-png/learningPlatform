@@ -1,11 +1,17 @@
+import base64
+import binascii
 import hashlib
+import hmac
 import math
 import secrets
 import uuid
+from datetime import timedelta
 from typing import Any, cast
 
 from django.conf import settings
 from django.contrib.auth import login, logout
+from django.contrib.sessions.models import Session
+from django.db import transaction
 from django.http import Http404, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -20,15 +26,21 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
+from accounts.rate_limit import pwa_transfer_rate_limited
 from learner.models import (
     AccessLink,
     Enrollment,
     LearnerSession,
     LessonProgress,
+    PwaSessionTransfer,
     hash_access_token,
+    hash_pwa_transfer_code,
 )
 from learner.offline_license import issue_offline_license
-from learner.serializers import LearnerProgressSerializer
+from learner.serializers import (
+    LearnerProgressSerializer,
+    PwaSessionTransferConsumeSerializer,
+)
 from learning.models import Course, CourseRevision
 from media_assets.models import MediaAsset
 from media_assets.storage import get_storage
@@ -53,6 +65,55 @@ def _active_enrollment(user: User, course_id: uuid.UUID) -> Enrollment:
 
 def _learner_user(request: Request) -> User:
     return cast(User, request.user)
+
+
+def _private_no_store(response: Response) -> Response:
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+def _replace_learner_session(request: Request, learner: User) -> LearnerSession:
+    now = timezone.now()
+    current_session_key = request.session.session_key
+    if current_session_key:
+        LearnerSession.objects.filter(
+            session_key=current_session_key, revoked_at__isnull=True
+        ).update(revoked_at=now)
+    LearnerSession.objects.filter(learner=learner, revoked_at__isnull=True).update(revoked_at=now)
+    request.session.flush()
+    login(request._request, learner)
+    session_key = request.session.session_key
+    if session_key is None:
+        raise RuntimeError("Django did not create a learner session")
+    return LearnerSession.objects.create(
+        learner=learner,
+        session_key=session_key,
+        device_hash=hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
+    )
+
+
+def _new_transfer_code(transfer_id: uuid.UUID) -> str:
+    public_id = base64.urlsafe_b64encode(transfer_id.bytes).rstrip(b"=").decode("ascii")
+    return f"{public_id}.{secrets.token_urlsafe(16)}"
+
+
+def _transfer_id(code: str) -> uuid.UUID | None:
+    try:
+        public_id, secret = code.split(".", maxsplit=1)
+        if not secret:
+            return None
+        decoded = base64.urlsafe_b64decode(public_id + "=" * (-len(public_id) % 4))
+        if len(decoded) != 16:
+            return None
+        return uuid.UUID(bytes=decoded)
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _invalid_transfer() -> Response:
+    return _private_no_store(
+        Response({"code": "PWA_TRANSFER_INVALID"}, status=status.HTTP_403_FORBIDDEN)
+    )
 
 
 class LearnerSessionAuthentication(SessionAuthentication):
@@ -83,7 +144,7 @@ class LearnerCsrfView(APIView):
     permission_classes = (AllowAny,)
 
     def get(self, request: Request) -> Response:
-        return Response({"csrfToken": get_token(request._request)})
+        return _private_no_store(Response({"csrfToken": get_token(request._request)}))
 
 
 class AccessLinkView(APIView):
@@ -97,12 +158,14 @@ class AccessLinkView(APIView):
         )
         if link is None or link.enrollment.status != Enrollment.Status.ACTIVE:
             raise Http404
-        return Response(
-            {
-                "email": link.enrollment.learner.email,
-                "course_title": link.enrollment.course.title,
-                "ready": True,
-            }
+        return _private_no_store(
+            Response(
+                {
+                    "email": link.enrollment.learner.email,
+                    "course_title": link.enrollment.course.title,
+                    "ready": True,
+                }
+            )
         )
 
 
@@ -118,21 +181,118 @@ class LearnerSessionView(APIView):
             .first()
         )
         if link is None or link.enrollment.status != Enrollment.Status.ACTIVE:
-            return Response({"code": "ACCESS_REVOKED"}, status=status.HTTP_403_FORBIDDEN)
-        learner = link.enrollment.learner
-        LearnerSession.objects.filter(learner=learner, revoked_at__isnull=True).update(
-            revoked_at=timezone.now()
+            return _private_no_store(
+                Response({"code": "ACCESS_REVOKED"}, status=status.HTTP_403_FORBIDDEN)
+            )
+        with transaction.atomic():
+            learner = User.objects.select_for_update().get(pk=link.enrollment.learner_id)
+            _replace_learner_session(request, learner)
+        return _private_no_store(
+            Response({"ok": True, "course_id": str(link.enrollment.course_id)})
         )
-        login(request._request, learner)
-        session_key = request.session.session_key
-        if session_key is None:
-            return Response({"code": "SESSION_CREATE_FAILED"}, status=500)
-        LearnerSession.objects.create(
-            learner=learner,
-            session_key=session_key,
-            device_hash=hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
+
+
+class PwaSessionTransferView(LearnerAPIView):
+    def post(self, request: Request) -> Response:
+        learner = _learner_user(request)
+        source_session = cast(LearnerSession, request.auth)
+        transfer_id = uuid.uuid4()
+        code = _new_transfer_code(transfer_id)
+        now = timezone.now()
+        with transaction.atomic():
+            locked_learner = User.objects.select_for_update().get(pk=learner.pk)
+            locked_source = (
+                LearnerSession.objects.select_for_update()
+                .filter(
+                    pk=source_session.pk,
+                    learner=locked_learner,
+                    revoked_at__isnull=True,
+                )
+                .first()
+            )
+            if locked_source is None:
+                raise AuthenticationFailed({"code": "SESSION_REVOKED"}, code="SESSION_REVOKED")
+            PwaSessionTransfer.objects.filter(
+                source_session=locked_source, used_at__isnull=True
+            ).update(used_at=now)
+            transfer = PwaSessionTransfer.objects.create(
+                id=transfer_id,
+                learner=locked_learner,
+                source_session=locked_source,
+                code_hash=hash_pwa_transfer_code(code),
+                expires_at=now + timedelta(seconds=settings.PWA_TRANSFER_TTL_SECONDS),
+            )
+        return _private_no_store(
+            Response(
+                {"code": code, "expires_at": transfer.expires_at.isoformat()},
+                status=status.HTTP_201_CREATED,
+            )
         )
-        return Response({"ok": True, "course_id": str(link.enrollment.course_id)})
+
+
+class PwaSessionTransferConsumeView(APIView):
+    permission_classes = (AllowAny,)
+
+    @method_decorator(csrf_protect)
+    def post(self, request: Request) -> Response:
+        if pwa_transfer_rate_limited(request._request):
+            response = Response(
+                {"code": "PWA_TRANSFER_RATE_LIMITED"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+            response["Retry-After"] = str(settings.PWA_TRANSFER_RATE_WINDOW_SECONDS)
+            return _private_no_store(response)
+
+        serializer = PwaSessionTransferConsumeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _invalid_transfer()
+        code = serializer.validated_data["code"]
+        transfer_id = _transfer_id(code)
+        if transfer_id is None:
+            return _invalid_transfer()
+        learner_id = (
+            PwaSessionTransfer.objects.filter(pk=transfer_id)
+            .values_list("learner_id", flat=True)
+            .first()
+        )
+        if learner_id is None:
+            return _invalid_transfer()
+
+        valid = False
+        with transaction.atomic():
+            learner = User.objects.select_for_update().get(pk=learner_id)
+            transfer = (
+                PwaSessionTransfer.objects.select_for_update()
+                .select_related("source_session")
+                .filter(pk=transfer_id, learner=learner)
+                .first()
+            )
+            now = timezone.now()
+            if transfer is None:
+                pass
+            elif not hmac.compare_digest(transfer.code_hash, hash_pwa_transfer_code(code)):
+                if transfer.failed_attempts < settings.PWA_TRANSFER_MAX_ATTEMPTS:
+                    transfer.failed_attempts += 1
+                    transfer.save(update_fields=("failed_attempts",))
+            elif (
+                transfer.used_at is not None
+                or transfer.expires_at <= now
+                or transfer.failed_attempts >= settings.PWA_TRANSFER_MAX_ATTEMPTS
+                or transfer.source_session.revoked_at is not None
+                or not Session.objects.filter(
+                    session_key=transfer.source_session.session_key,
+                    expire_date__gt=now,
+                ).exists()
+            ):
+                pass
+            else:
+                transfer.used_at = now
+                transfer.save(update_fields=("used_at",))
+                _replace_learner_session(request, learner)
+                valid = True
+        if not valid:
+            return _invalid_transfer()
+        return _private_no_store(Response({"ok": True}))
 
 
 class LearnerLogoutView(LearnerAPIView):

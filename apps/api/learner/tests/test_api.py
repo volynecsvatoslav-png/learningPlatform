@@ -1,16 +1,28 @@
 import json
 import secrets
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import jwt
 import pytest
+from django.core.cache import cache
+from django.db import close_old_connections, connections
 from django.test import Client
 from django.utils import timezone
 
 from accounts.models import User
-from learner.models import AccessLink, Enrollment, LearnerSession, LessonProgress, hash_access_token
-from learner.offline_license import verification_jwk
+from config.offline_keys import DEVELOPMENT_OFFLINE_LICENSE_PUBLIC_JWK
+from learner.models import (
+    AccessLink,
+    Enrollment,
+    LearnerSession,
+    LessonProgress,
+    PwaSessionTransfer,
+    hash_access_token,
+)
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import publish_course
 from media_assets.models import MediaAsset
@@ -48,6 +60,13 @@ def session_login(client: Client, token: str) -> None:
     assert response.status_code == 200
 
 
+def create_pwa_transfer(client: Client) -> str:
+    response = client.post("/api/v1/learner/pwa-transfer")
+    assert response.status_code == 201
+    assert response["Cache-Control"] == "private, no-store"
+    return str(response.json()["code"])
+
+
 def test_access_token_is_hashed_and_exchange_creates_server_session(client: Client) -> None:
     learner, course, _, token = make_access()
 
@@ -79,6 +98,185 @@ def test_second_device_revokes_first_and_old_session_gets_code(client: Client) -
     assert response.status_code == 401
     assert response.json()["code"] == "SESSION_REVOKED"
     assert second.get("/api/v1/learner/courses").status_code == 200
+
+
+def test_pwa_transfer_is_hashed_consumed_once_and_replaces_source_session() -> None:
+    learner, _, _, access_token = make_access()
+    source = Client()
+    destination = Client()
+    session_login(source, access_token)
+    source_session = LearnerSession.objects.get()
+
+    code = create_pwa_transfer(source)
+    transfer = PwaSessionTransfer.objects.get()
+    assert transfer.learner == learner
+    assert transfer.source_session == source_session
+    assert transfer.code_hash != code
+
+    response = destination.post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": code},
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response["Cache-Control"] == "private, no-store"
+    transfer.refresh_from_db()
+    source_session.refresh_from_db()
+    assert transfer.used_at is not None
+    assert source_session.revoked_at is not None
+    assert LearnerSession.objects.filter(learner=learner, revoked_at__isnull=True).count() == 1
+    assert source.get("/api/v1/learner/courses").json()["code"] == "SESSION_REVOKED"
+    assert destination.get("/api/v1/learner/courses").status_code == 200
+
+    replay = Client().post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": code},
+        content_type="application/json",
+    )
+    assert replay.status_code == 403
+    assert replay.json() == {"code": "PWA_TRANSFER_INVALID"}
+
+
+def test_new_pwa_transfer_invalidates_previous_unused_code() -> None:
+    _, _, _, access_token = make_access()
+    source = Client()
+    session_login(source, access_token)
+
+    first_code = create_pwa_transfer(source)
+    first = PwaSessionTransfer.objects.get()
+    second_code = create_pwa_transfer(source)
+    first.refresh_from_db()
+    assert first.used_at is not None
+
+    response = Client().post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": first_code},
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+    assert response.json() == {"code": "PWA_TRANSFER_INVALID"}
+    assert second_code != first_code
+
+
+def test_expired_pwa_transfer_is_rejected_without_revoking_source() -> None:
+    _, _, _, access_token = make_access()
+    source = Client()
+    session_login(source, access_token)
+    source_session = LearnerSession.objects.get()
+    code = create_pwa_transfer(source)
+    PwaSessionTransfer.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
+
+    response = Client().post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": code},
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+    assert response.json() == {"code": "PWA_TRANSFER_INVALID"}
+    source_session.refresh_from_db()
+    assert source_session.revoked_at is None
+
+
+def test_pwa_transfer_from_revoked_source_session_is_rejected() -> None:
+    _, _, _, access_token = make_access()
+    source = Client()
+    session_login(source, access_token)
+    code = create_pwa_transfer(source)
+    LearnerSession.objects.update(revoked_at=timezone.now())
+
+    response = Client().post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": code},
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+    assert response.json() == {"code": "PWA_TRANSFER_INVALID"}
+    assert not LearnerSession.objects.filter(revoked_at__isnull=True).exists()
+
+
+def test_pwa_transfer_attempt_limit_and_server_rate_limit(settings) -> None:  # type: ignore[no-untyped-def]
+    _, _, _, access_token = make_access()
+    source = Client()
+    session_login(source, access_token)
+    code = create_pwa_transfer(source)
+    public_id, secret = code.split(".", maxsplit=1)
+    wrong_secret = ("A" if secret[0] != "A" else "B") + secret[1:]
+    wrong_code = f"{public_id}.{wrong_secret}"
+    settings.PWA_TRANSFER_MAX_ATTEMPTS = 2
+
+    destination = Client()
+    for _ in range(2):
+        response = destination.post(
+            "/api/v1/learner/pwa-transfer/consume",
+            data={"code": wrong_code},
+            content_type="application/json",
+            REMOTE_ADDR="203.0.113.10",
+        )
+        assert response.status_code == 403
+        assert response.json() == {"code": "PWA_TRANSFER_INVALID"}
+    assert PwaSessionTransfer.objects.get().failed_attempts == 2
+    assert (
+        destination.post(
+            "/api/v1/learner/pwa-transfer/consume",
+            data={"code": code},
+            content_type="application/json",
+            REMOTE_ADDR="203.0.113.10",
+        ).status_code
+        == 403
+    )
+
+    cache.clear()
+    settings.PWA_TRANSFER_RATE_LIMIT = 1
+    first = destination.post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": "not-a-code"},
+        content_type="application/json",
+        REMOTE_ADDR="203.0.113.20",
+    )
+    limited = destination.post(
+        "/api/v1/learner/pwa-transfer/consume",
+        data={"code": "not-a-code"},
+        content_type="application/json",
+        REMOTE_ADDR="203.0.113.20",
+    )
+    assert first.status_code == 403
+    assert limited.status_code == 429
+    assert limited.json() == {"code": "PWA_TRANSFER_RATE_LIMITED"}
+    assert limited["Cache-Control"] == "private, no-store"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_pwa_transfer_consume_allows_exactly_one_request() -> None:
+    _, _, _, access_token = make_access()
+    source = Client()
+    session_login(source, access_token)
+    code = create_pwa_transfer(source)
+    barrier = threading.Barrier(2)
+
+    def consume(address: str) -> tuple[int, dict[str, object]]:
+        close_old_connections()
+        try:
+            destination = Client()
+            barrier.wait(timeout=10)
+            response = destination.post(
+                "/api/v1/learner/pwa-transfer/consume",
+                data={"code": code},
+                content_type="application/json",
+                REMOTE_ADDR=address,
+            )
+            return response.status_code, response.json()
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(consume, ("203.0.113.31", "203.0.113.32")))
+
+    assert sorted(status_code for status_code, _ in results) == [200, 403]
+    assert [body for status_code, body in results if status_code == 403] == [
+        {"code": "PWA_TRANSFER_INVALID"}
+    ]
+    assert PwaSessionTransfer.objects.get().used_at is not None
+    assert LearnerSession.objects.filter(revoked_at__isnull=True).count() == 1
 
 
 def test_revoked_enrollment_blocks_course_and_access_link(client: Client) -> None:
@@ -366,7 +564,7 @@ def test_shared_offline_license_fixture_matches_backend_public_key() -> None:
     fixture_path = Path(__file__).parent / "fixtures" / "offline_license.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
 
-    assert fixture["publicJwk"] == verification_jwk()
+    assert fixture["publicJwk"] == DEVELOPMENT_OFFLINE_LICENSE_PUBLIC_JWK
     claims = jwt.decode(
         fixture["tokens"]["revision-1"],
         jwt.algorithms.ECAlgorithm.from_jwk(fixture["publicJwk"]),

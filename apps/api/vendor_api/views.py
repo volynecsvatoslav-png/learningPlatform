@@ -97,7 +97,7 @@ def _send_access_link(enrollment: Enrollment) -> str:
         revoked_at=timezone.now()
     )
     AccessLink.objects.create(enrollment=enrollment, token_hash=hash_access_token(token))
-    url = f"{settings.PUBLIC_APP_URL}/app/access/{token}"
+    url = f"{settings.PUBLIC_APP_URL}/app/#access={token}"
     send_mail(
         subject=f"Доступ к курсу: {enrollment.course.title}",
         message=f"Откройте ссылку для входа: {url}",

@@ -373,6 +373,8 @@ def test_grant_revoke_and_reissue_access_store_only_hash(client: Client) -> None
         assert first.token_hash == hash_access_token("a" * 43)
         assert "a" * 43 not in first.token_hash
         assert len(mail.outbox) == 1
+        assert f"/app/#access={'a' * 43}" in mail.outbox[0].body
+        assert "/app/access/" not in mail.outbox[0].body
 
         response = client.post(f"/api/v1/vendor/access/{enrollment_id}/reissue")
         assert response.status_code == 200

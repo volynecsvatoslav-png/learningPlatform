@@ -45,10 +45,11 @@ async function sessionStatus(page: Page): Promise<{ status: number; code?: strin
   })
 }
 
-test('vendor creates a course, grants access, and replaces the learner session', async ({
+test('installed PWA consumes a transfer code and replaces the browser session', async ({
   browser,
   request,
 }) => {
+  test.setTimeout(120_000)
   const ownerEmail = requiredEnvironment('E2E_OWNER_EMAIL')
   const ownerPassword = requiredEnvironment('E2E_OWNER_PASSWORD')
   const vendorName = requiredEnvironment('E2E_VENDOR_NAME')
@@ -150,30 +151,60 @@ test('vendor creates a course, grants access, and replaces the learner session',
   const detail = await request.get(new URL(`/api/v1/message/${encodeURIComponent(message.ID)}`, mailpitURL).toString())
   expect(detail.ok()).toBeTruthy()
   const body = await detail.json() as { Text?: string }
-  const emailedAccessURL = body.Text?.match(/https?:\/\/[^\s]+\/app\/access\/[^\s]+/)?.[0]
+  const emailedAccessURL = body.Text?.match(/https?:\/\/[^\s]+\/app\/[^\s]*/)?.[0]
   expect(emailedAccessURL).toBeTruthy()
-  const accessPath = new URL(emailedAccessURL as string).pathname
+  const parsedAccessURL = new URL(emailedAccessURL as string)
+  const accessPath = `${parsedAccessURL.pathname}${parsedAccessURL.search}${parsedAccessURL.hash}`
   await vendorContext.close()
 
   const first = await browser.newContext({ baseURL })
   const firstPage = await first.newPage()
   await firstPage.goto(accessPath)
-  await expect(firstPage.getByRole('heading', { name: courseTitle })).toBeVisible()
+  await expect(firstPage.getByRole('heading', { name: 'Персональный доступ' })).toBeVisible()
   await firstPage.getByRole('button', { name: /Открыть курс/ }).click()
   await expect(firstPage.getByRole('heading', { name: courseTitle })).toBeVisible()
   await expect(firstPage.getByText(`E2E content ${unique}`, { exact: true })).toBeVisible()
+  await firstPage.getByRole('button', { name: /Все курсы/ }).click()
+  const transferResponsePromise = firstPage.waitForResponse((response) =>
+    response.request().method() === 'POST'
+    && response.url().endsWith('/api/v1/learner/pwa-transfer'),
+  )
+  await firstPage.getByRole('button', { name: 'Перенести вход в установленное приложение' }).click()
+  expect((await transferResponsePromise).status()).toBe(201)
+  const transferCode = await firstPage.locator('output[aria-label="Код переноса"]').textContent()
+  expect(transferCode).toBeTruthy()
 
   const second = await browser.newContext({ baseURL })
+  await second.addInitScript(() => {
+    const regularMatchMedia = window.matchMedia.bind(window)
+    window.matchMedia = (query: string) => query === '(display-mode: standalone)'
+      ? {
+          matches: true,
+          media: query,
+          onchange: null,
+          addListener: () => undefined,
+          removeListener: () => undefined,
+          addEventListener: () => undefined,
+          removeEventListener: () => undefined,
+          dispatchEvent: () => true,
+        }
+      : regularMatchMedia(query)
+    Object.defineProperty(navigator, 'standalone', { configurable: true, value: true })
+  })
   const secondPage = await second.newPage()
-  await secondPage.goto(accessPath)
-  await secondPage.getByRole('button', { name: /Открыть курс/ }).click()
-  await expect(secondPage.getByRole('heading', { name: courseTitle })).toBeVisible()
+  await secondPage.goto('/app/')
+  await expect(secondPage.getByRole('heading', { name: 'Перенос входа' })).toBeVisible()
+  await secondPage.getByLabel('Код переноса').fill(transferCode as string)
+  await secondPage.getByRole('button', { name: 'Перенести вход' }).click()
+  await expect(secondPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
+  await expect(secondPage.getByRole('button', { name: new RegExp(courseTitle) })).toBeVisible()
 
   expect(await sessionStatus(firstPage)).toEqual({ status: 401, code: 'SESSION_REVOKED' })
   await firstPage.reload()
   await expect(firstPage.getByRole('heading', { name: /Сессия открыта на другом устройстве/ })).toBeVisible()
 
   expect((await sessionStatus(secondPage)).status).toBe(200)
+  await secondPage.getByRole('button', { name: new RegExp(courseTitle) }).click()
   await expect(secondPage.getByRole('heading', { name: courseTitle })).toBeVisible()
   await expect(secondPage.getByText(`E2E content ${unique}`, { exact: true })).toBeVisible()
   await expect(secondPage.getByRole('button', { name: /Отметить урок завершённым/ })).toBeVisible()

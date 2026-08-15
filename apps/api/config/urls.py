@@ -17,6 +17,8 @@ from learner.views import (
     LearnerProgressView,
     LearnerSessionView,
     LearnerStreamURLView,
+    PwaSessionTransferConsumeView,
+    PwaSessionTransferView,
 )
 from media_assets.views import (
     MediaStatusView,
@@ -167,6 +169,16 @@ urlpatterns = [
     path("api/v1/learner/access/<str:token>", AccessLinkView.as_view(), name="learner-access"),
     path("api/v1/learner/csrf", LearnerCsrfView.as_view(), name="learner-csrf"),
     path("api/v1/learner/session", LearnerSessionView.as_view(), name="learner-session"),
+    path(
+        "api/v1/learner/pwa-transfer",
+        PwaSessionTransferView.as_view(),
+        name="learner-pwa-transfer",
+    ),
+    path(
+        "api/v1/learner/pwa-transfer/consume",
+        PwaSessionTransferConsumeView.as_view(),
+        name="learner-pwa-transfer-consume",
+    ),
     path("api/v1/learner/logout", LearnerLogoutView.as_view(), name="learner-logout"),
     path("api/v1/learner/courses", LearnerCourseListView.as_view(), name="learner-courses"),
     path(

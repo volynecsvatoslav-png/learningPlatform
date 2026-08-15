@@ -20,12 +20,13 @@ const snapshot = {
 }
 
 test('downloads, plays, expires and deletes an encrypted PWA course', async ({ context, page }) => {
-  await context.route('**/api/v1/vendor/csrf', async (route) => {
-    await route.fulfill({ json: { csrfToken: 'e2e-csrf' } })
-  })
   await context.route('**/api/v1/learner/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
+    if (url.pathname === '/api/v1/learner/csrf') {
+      await route.fulfill({ json: { csrfToken: 'e2e-csrf' } })
+      return
+    }
     if (url.pathname === '/api/v1/learner/courses') {
       await route.fulfill({ json: [{ id: 'course-1', title: snapshot.title, short_description: snapshot.short_description, description_markdown: '', cover_asset_id: null }] })
       return
@@ -163,4 +164,36 @@ test('downloads, plays, expires and deletes an encrypted PWA course', async ({ c
     return { counts, opfsEntries }
   })
   await expect.poll(readStorageState).toEqual({ counts: [0, 0, 0], opfsEntries: 0 })
+})
+
+test('purges legacy auth entries and never caches access URLs', async ({ context, page }) => {
+  const legacySecret = 'legacy-secret-that-must-be-purged'
+  await page.goto('/app/')
+  await page.evaluate(async (secret) => {
+    await navigator.serviceWorker.ready
+    const cache = await caches.open('learning-platform-shell-v2')
+    await cache.put(`/app/access/${secret}`, new Response('legacy sensitive entry'))
+    const registration = await navigator.serviceWorker.getRegistration()
+    await registration?.unregister()
+  }, legacySecret)
+  await page.close()
+
+  const freshPage = await context.newPage()
+  await freshPage.goto('/app/')
+  await freshPage.evaluate(async () => { await navigator.serviceWorker.ready })
+  await freshPage.reload()
+  await expect.poll(() => freshPage.evaluate(async (secret) => {
+    const names = await caches.keys()
+    const urls = (await Promise.all(names.map(async (name) => (await caches.open(name)).keys()))).flat().map((request) => request.url)
+    return urls.every((url) => !url.includes(secret))
+  }, legacySecret)).toBe(true)
+
+  const currentSecret = 'current-secret-that-must-not-be-cached'
+  await freshPage.goto(`/app/access/${currentSecret}`)
+  await expect(freshPage.getByRole('heading', { name: 'Персональный доступ' })).toBeVisible()
+  const cachedUrls = await freshPage.evaluate(async () => {
+    const names = await caches.keys()
+    return (await Promise.all(names.map(async (name) => (await caches.open(name)).keys()))).flat().map((request) => request.url)
+  })
+  expect(cachedUrls.some((url) => url.includes(currentSecret))).toBe(false)
 })

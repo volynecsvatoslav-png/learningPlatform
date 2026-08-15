@@ -1,9 +1,17 @@
-const SHELL_CACHE = 'learning-platform-shell-v2'
+const CACHE_PREFIX = 'learning-platform-shell-'
+const SHELL_CACHE = `${CACHE_PREFIX}v3`
 const DB_NAME = 'learning-platform-offline'
 const DB_VERSION = 1
 const encoder = new TextEncoder()
 const configuredLicenseKey = new URL(self.location.href).searchParams.get('licenseKey')
 const OFFLINE_LICENSE_PUBLIC_JWK = configuredLicenseKey ? JSON.parse(configuredLicenseKey) : null
+
+function isSensitivePath(pathname) {
+  return /^\/app\/access(?:\/|$)/.test(pathname)
+    || /^\/vendor\/reset(?:\/|$)/.test(pathname)
+    || /^\/api\/v1\/learner\/(?:access|csrf|session|logout|pwa-transfer)(?:\/|$)/.test(pathname)
+    || /^\/api\/v1\/vendor\/(?:csrf|auth)(?:\/|$)/.test(pathname)
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.add('/app/')).then(() => self.skipWaiting()))
@@ -12,7 +20,12 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((names) => Promise.all(names.filter((name) => name !== SHELL_CACHE).map((name) => caches.delete(name))))
+      .then((names) => Promise.all(names.filter((name) => name.startsWith(CACHE_PREFIX)).map(async (name) => {
+        const cache = await caches.open(name)
+        const requests = await cache.keys()
+        await Promise.all(requests.filter((request) => isSensitivePath(new URL(request.url).pathname)).map((request) => cache.delete(request)))
+        if (name !== SHELL_CACHE) await caches.delete(name)
+      })))
       .then(() => self.clients.claim()),
   )
 })
@@ -170,11 +183,16 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(offlineMediaResponse(event.request, decodeURIComponent(offlineMatch[1]), decodeURIComponent(offlineMatch[2])))
     return
   }
+  if (url.origin === self.location.origin && isSensitivePath(url.pathname)) {
+    if (url.pathname.startsWith('/api/')) return
+    event.respondWith(fetch(event.request, { cache: 'no-store' }))
+    return
+  }
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        if (response.ok) void caches.open(SHELL_CACHE).then((cache) => cache.put(event.request, response.clone()))
+        if (response.ok && !response.headers.get('Cache-Control')?.includes('no-store')) void caches.open(SHELL_CACHE).then((cache) => cache.put(event.request, response.clone()))
         return response
       })
       .catch(async () => (await caches.match(event.request)) ?? (event.request.mode === 'navigate' ? (await caches.match('/app/')) ?? Response.error() : Response.error())),

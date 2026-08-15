@@ -11,12 +11,47 @@ function Markdown({ text }: { text: string }) {
   })}</>
 }
 
-function AccessLogin({ token, onLogin }: { token: string; onLogin: (courseId: string) => void }) {
-  const access = useQuery({ queryKey: ['access-link', token], queryFn: () => learnerApi.access(token) })
-  const login = useMutation({ mutationFn: () => learnerApi.login(token), onSuccess: (data) => { window.history.replaceState({}, '', '/app/'); onLogin(data.course_id) } })
-  if (access.isLoading) return <main className="loading-screen">Проверяем ссылку...</main>
-  if (access.isError || !access.data) return <main className="state-screen"><h1>Доступ отозван</h1><p>Эта ссылка больше недействительна. Попросите вендора перевыпустить доступ.</p></main>
-  return <main className="auth-layout"><section className="auth-card"><p className="eyebrow">Вход ученика</p><h1>{access.data.course_title}</h1><p className="muted">Ссылка предназначена для {access.data.email}. На новом устройстве предыдущая сессия будет закрыта.</p><button className="primary-action" onClick={() => { login.mutate() }}>Открыть курс <span aria-hidden="true">→</span></button>{login.error && <p className="form-error">Ссылка больше недействительна.</p>}</section></main>
+function takeAccessTokenFromLocation(): string | null {
+  const legacyMatch = /^\/app\/access\/([^/]+)\/?$/.exec(window.location.pathname)
+  const fragmentToken = new URLSearchParams(window.location.hash.slice(1)).get('access')
+  const encoded = legacyMatch?.[1] ?? fragmentToken
+  if (!encoded) return null
+  window.history.replaceState({}, '', '/app/')
+  try {
+    return decodeURIComponent(encoded)
+  } catch {
+    return null
+  }
+}
+
+function accessTokenFromPastedLink(value: string): string | null {
+  try {
+    const url = new URL(value.trim())
+    if (!['http:', 'https:'].includes(url.protocol)) return null
+    const legacyMatch = /^\/app\/access\/([^/]+)\/?$/.exec(url.pathname)
+    const encoded = legacyMatch?.[1] ?? new URLSearchParams(url.hash.slice(1)).get('access')
+    if (!encoded) return null
+    return decodeURIComponent(encoded)
+  } catch {
+    return null
+  }
+}
+
+function AccessLogin({ token, onLogin }: { token: string; onLogin: (courseId: string) => Promise<void> }) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState(false)
+  const openCourse = async () => {
+    setPending(true); setError(false)
+    try {
+      const result = await learnerApi.login(token)
+      await onLogin(result.course_id)
+    } catch {
+      setError(true)
+    } finally {
+      setPending(false)
+    }
+  }
+  return <main className="auth-layout"><section className="auth-card"><p className="eyebrow">Вход ученика</p><h1>Персональный доступ</h1><p className="muted">Откройте курс по ссылке из письма. На новом устройстве предыдущая сессия будет закрыта.</p><button className="primary-action" disabled={pending} onClick={() => { void openCourse() }}>{pending ? 'Открываем…' : 'Открыть курс'} <span aria-hidden="true">→</span></button>{error && <p className="form-error">Ссылка больше недействительна.</p>}</section></main>
 }
 
 function VideoMedia({ src, watermark }: { src: string; watermark: string }) {
@@ -50,6 +85,106 @@ function useServiceWorkerReady() {
     return () => { navigator.serviceWorker.removeEventListener('controllerchange', update) }
   }, [enabled])
   return enabled && ready
+}
+
+function standaloneMedia(): MediaQueryList | null {
+  try {
+    return window.matchMedia('(display-mode: standalone)')
+  } catch {
+    return null
+  }
+}
+
+function standaloneDisplayMode(): boolean {
+  const iosNavigator = navigator as Navigator & { standalone?: boolean }
+  return Boolean(standaloneMedia()?.matches) || Boolean(iosNavigator.standalone)
+}
+
+function useStandaloneMode() {
+  const [standalone, setStandalone] = useState(standaloneDisplayMode)
+  useEffect(() => {
+    const media = standaloneMedia()
+    const update = () => { setStandalone(standaloneDisplayMode()) }
+    media?.addEventListener('change', update)
+    window.addEventListener('pageshow', update)
+    return () => {
+      media?.removeEventListener('change', update)
+      window.removeEventListener('pageshow', update)
+    }
+  }, [])
+  return standalone
+}
+
+function TransferPanel() {
+  const [transfer, setTransfer] = useState<{ code: string; expiresAt: string }>()
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!transfer) return
+    const delay = Math.min(2_147_483_647, Math.max(0, Date.parse(transfer.expiresAt) - Date.now()))
+    const timeout = window.setTimeout(() => { setTransfer(undefined); setCopied(false) }, delay)
+    return () => { window.clearTimeout(timeout) }
+  }, [transfer])
+  const create = async () => {
+    setPending(true); setError(''); setCopied(false)
+    try {
+      const result = await learnerApi.createPwaTransfer()
+      setTransfer({ code: result.code, expiresAt: result.expires_at })
+    } catch {
+      setError('Не удалось создать код. Обновите страницу и повторите попытку.')
+    } finally {
+      setPending(false)
+    }
+  }
+  const copy = async () => {
+    if (!transfer) return
+    try {
+      await navigator.clipboard.writeText(transfer.code)
+      setCopied(true)
+    } catch {
+      setError('Не удалось скопировать код. Выделите и скопируйте его вручную.')
+    }
+  }
+  return <section className="panel pwa-transfer-panel"><p className="eyebrow">Установленное приложение</p><h2>Перенос входа</h2><p className="muted">Откройте установленное приложение и введите одноразовый код. После переноса эта вкладка завершит работу.</p>{transfer ? <div className="transfer-code"><output aria-label="Код переноса">{transfer.code}</output><p>Код действует до {new Date(transfer.expiresAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.</p><button onClick={() => { void copy() }}>Скопировать код</button>{copied && <span className="form-success">Скопировано</span>}</div> : <button className="primary-action" disabled={pending} onClick={() => { void create() }}>{pending ? 'Создаём код…' : 'Перенести вход в установленное приложение'}</button>}{error && <p className="form-error">{error}</p>}</section>
+}
+
+function PwaTransferLogin({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
+  const [code, setCode] = useState('')
+  const [magicLink, setMagicLink] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const transfer = async () => {
+    if (!code.trim()) return
+    setPending(true); setError('')
+    try {
+      await learnerApi.consumePwaTransfer(code.trim())
+      setCode(''); setMagicLink('')
+      await onAuthenticated()
+    } catch (reason) {
+      setError(reason instanceof ApiError && reason.code === 'PWA_TRANSFER_RATE_LIMITED' ? 'Слишком много попыток. Подождите несколько минут.' : 'Код недействителен или истёк. Создайте новый код в обычном браузере.')
+    } finally {
+      setPending(false)
+    }
+  }
+  const loginWithMagicLink = async () => {
+    const token = accessTokenFromPastedLink(magicLink)
+    if (!token) {
+      setError('Вставьте полную ссылку из письма.')
+      return
+    }
+    setPending(true); setError(''); setMagicLink('')
+    try {
+      await learnerApi.login(token)
+      setCode('')
+      await onAuthenticated()
+    } catch {
+      setError('Ссылка недействительна. Попросите владельца курса переотправить доступ.')
+    } finally {
+      setPending(false)
+    }
+  }
+  return <main className="auth-layout"><section className="auth-card transfer-login"><p className="eyebrow">Установленное приложение</p><h1>Перенос входа</h1><p className="muted">Откройте ссылку из письма в обычном браузере, войдите в кабинет и нажмите «Перенести вход в установленное приложение». Затем введите показанный код здесь.</p><form onSubmit={(event) => { event.preventDefault(); void transfer() }} autoComplete="off"><label>Код переноса<input value={code} onChange={(event) => { setCode(event.target.value) }} autoComplete="off" spellCheck={false} /></label><button className="primary-action" type="submit" disabled={pending || !code.trim()}>Перенести вход</button></form><details><summary>Резервный вход по ссылке из письма</summary><form onSubmit={(event) => { event.preventDefault(); void loginWithMagicLink() }} autoComplete="off"><label>Полная ссылка из письма<input type="url" value={magicLink} onChange={(event) => { setMagicLink(event.target.value) }} autoComplete="off" spellCheck={false} /></label><button type="submit" disabled={pending || !magicLink.trim()}>Войти по ссылке</button></form></details>{error && <p className="form-error">{error}</p>}</section></main>
 }
 
 export function MediaUnit({ courseId, unit, watermark, offlinePackage, offlineAssetAvailable, snapshotLoadedOffline }: { courseId: string; unit: ContentUnit; watermark: string; offlinePackage?: OfflinePackage; offlineAssetAvailable: boolean; snapshotLoadedOffline: boolean }) {
@@ -89,10 +224,10 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
   const online = useOnlineStatus()
   const queryClient = useQueryClient()
   const course = useQuery({ queryKey: ['learner-course', courseId], networkMode: 'always', queryFn: async () => {
-    try { return { snapshot: await learnerApi.course(courseId), loadedFromOffline: false } } catch (error) { const local = await readOfflineSnapshot(courseId); if (local) return { snapshot: local, loadedFromOffline: true }; throw error instanceof Error ? error : new Error('Не удалось открыть курс.') }
+    try { return { snapshot: await learnerApi.course(courseId), loadedFromOffline: false } } catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; const local = await readOfflineSnapshot(courseId); if (local) return { snapshot: local, loadedFromOffline: true }; throw error instanceof Error ? error : new Error('Не удалось открыть курс.') }
   } })
   const progress = useQuery({ queryKey: ['learner-progress', courseId], networkMode: 'always', queryFn: async () => {
-    try { return await learnerApi.progress(courseId) } catch (error) { if (await getOfflinePackage(courseId)) return []; throw error instanceof Error ? error : new Error('Не удалось загрузить прогресс.') }
+    try { return await learnerApi.progress(courseId) } catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; if (await getOfflinePackage(courseId)) return []; throw error instanceof Error ? error : new Error('Не удалось загрузить прогресс.') }
   } })
   const offlineInfo = useQuery({ queryKey: ['learner-offline-manifest', courseId], queryFn: () => learnerApi.offlineManifest(courseId), enabled: online && Boolean(course.data?.snapshot) })
   const save = useMutation({ mutationFn: ({ id, percent }: { id: string; percent: number }) => learnerApi.saveProgress(courseId, id, percent), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['learner-progress', courseId] }) } })
@@ -143,20 +278,27 @@ function CourseCover({ course }: { course: LearnerCourse }) {
   return <div className="learner-course-cover cover-placeholder" aria-hidden="true">{course.title.slice(0, 1).toUpperCase()}</div>
 }
 
-function CourseCatalog({ courses, onSelect, onLogout }: { courses: LearnerCourse[]; onSelect: (id: string) => void; onLogout: () => void }) {
+function CourseCatalog({ courses, standalone, onSelect, onLogout }: { courses: LearnerCourse[]; standalone: boolean; onSelect: (id: string) => void; onLogout: () => void }) {
   const progressQueries = useQueries({ queries: courses.map((course) => ({ queryKey: ['learner-progress', course.id], queryFn: () => learnerApi.progress(course.id) })) })
-  return <main className="learner-shell"><header className="workspace-header"><div><p className="eyebrow">Кабинет ученика</p><h1>Все курсы</h1></div><button className="text-button" onClick={onLogout}>Выйти</button></header><section className="learner-catalog"><div className="catalog-heading"><h2>Ваши учебные маршруты</h2><p className="muted">Выберите курс. Мы продолжим с последнего незавершенного урока.</p></div><div className="learner-course-list">{courses.map((course, index) => { const rows = progressQueries[index]?.data ?? []; const completed = rows.filter((row) => row.status === 'completed').length; return <button className="learner-course-card" key={course.id} onClick={() => { onSelect(course.id) }}><CourseCover course={course} /><span className="course-card-copy"><span className="status">{completed > 0 ? `${String(completed)} уроков завершено` : 'Можно начинать'}</span><strong>{course.title}</strong><small>{course.short_description || 'Откройте курс, чтобы увидеть программу.'}</small><span className="course-card-link">Продолжить →</span></span></button> })}</div></section></main>
+  return <main className="learner-shell"><header className="workspace-header"><div><p className="eyebrow">Кабинет ученика</p><h1>Все курсы</h1></div><button className="text-button" onClick={onLogout}>Выйти</button></header>{!standalone && <TransferPanel />}<section className="learner-catalog"><div className="catalog-heading"><h2>Ваши учебные маршруты</h2><p className="muted">Выберите курс. Мы продолжим с последнего незавершенного урока.</p></div>{courses.length === 0 ? <p className="empty-state">Активных курсов пока нет.</p> : <div className="learner-course-list">{courses.map((course, index) => { const rows = progressQueries[index]?.data ?? []; const completed = rows.filter((row) => row.status === 'completed').length; return <button className="learner-course-card" key={course.id} onClick={() => { onSelect(course.id) }}><CourseCover course={course} /><span className="course-card-copy"><span className="status">{completed > 0 ? `${String(completed)} уроков завершено` : 'Можно начинать'}</span><strong>{course.title}</strong><small>{course.short_description || 'Откройте курс, чтобы увидеть программу.'}</small><span className="course-card-link">Продолжить →</span></span></button> })}</div>}</section></main>
 }
 
 export function LearnerPage() {
   const [courseId, setCourseId] = useState<string | null>(null)
+  const [accessToken, setAccessToken] = useState<string | null>(null)
+  const [locationReady, setLocationReady] = useState(false)
+  const [authEpoch, setAuthEpoch] = useState(0)
   const queryClient = useQueryClient()
   const serviceWorkerReady = useServiceWorkerReady()
-  const token = window.location.pathname.split('/').filter(Boolean).at(-1)
-  const hasAccessToken = Boolean(token && token !== 'app')
-  const existingCourses = useQuery({ queryKey: ['learner-courses'], networkMode: 'always', queryFn: async () => {
-    try { return await learnerApi.courses() } catch (error) { const local = await listOfflineCourses(); if (local.length) return local; throw error instanceof Error ? error : new Error('Не удалось загрузить курсы.') }
-  }, enabled: !courseId && !hasAccessToken })
+  const standalone = useStandaloneMode()
+  useEffect(() => {
+    const token = takeAccessTokenFromLocation()
+    if (token) setAccessToken(token)
+    setLocationReady(true)
+  }, [])
+  const existingCourses = useQuery({ queryKey: ['learner-courses', authEpoch], networkMode: 'always', queryFn: async () => {
+    try { return await learnerApi.courses() } catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; const local = await listOfflineCourses(); if (local.length) return local; throw error instanceof Error ? error : new Error('Не удалось загрузить курсы.') }
+  }, enabled: locationReady && !courseId && !accessToken })
   const logout = useMutation({ mutationFn: async () => { try { return await learnerApi.logout() } finally { await deleteAllOfflineCourses().catch(() => undefined) } }, onSuccess: () => { queryClient.clear(); setCourseId(null) } })
   useEffect(() => {
     const sync = () => { void syncOfflineCourses().catch(() => undefined) }
@@ -164,11 +306,20 @@ export function LearnerPage() {
     window.addEventListener('online', sync)
     return () => { window.removeEventListener('online', sync) }
   }, [])
+  const completeSessionChange = async (nextCourseId: string | null, purgeOffline: boolean) => {
+    queryClient.clear()
+    window.history.replaceState({}, '', '/app/')
+    if (purgeOffline) await deleteAllOfflineCourses().catch(() => undefined)
+    setAccessToken(null)
+    setCourseId(nextCourseId)
+    setAuthEpoch((value) => value + 1)
+  }
   const serviceWorkerStatus = <p className={serviceWorkerReady ? 'form-success' : 'muted'}>{serviceWorkerReady ? 'Офлайн-функции готовы' : 'Для офлайн-просмотра перезапустите приложение'}</p>
-  if (!courseId && hasAccessToken && token) return <>{serviceWorkerStatus}<AccessLogin token={token} onLogin={setCourseId} /></>
+  if (!locationReady) return <main className="loading-screen">Проверяем сессию...</main>
+  if (!courseId && accessToken) return <>{serviceWorkerStatus}<AccessLogin token={accessToken} onLogin={(id) => completeSessionChange(id, true)} /></>
   if (courseId) return <>{serviceWorkerStatus}<CourseView courseId={courseId} onBack={() => { setCourseId(null) }} /></>
   if (existingCourses.isLoading) return <main className="loading-screen">Проверяем сессию...</main>
   if (existingCourses.error instanceof ApiError && existingCourses.error.code === 'SESSION_REVOKED') return <main className="state-screen"><h1>Сессия открыта на другом устройстве</h1><p>Доступ открыт на другом устройстве. Откройте ссылку там, где хотите продолжить обучение.</p></main>
-  if (existingCourses.isError || !existingCourses.data?.length) return <main className="state-screen"><h1>Откройте ссылку из письма</h1><p>Для входа в кабинет ученика нужна персональная ссылка доступа.</p></main>
-  return <>{serviceWorkerStatus}<CourseCatalog courses={existingCourses.data} onSelect={setCourseId} onLogout={() => { logout.mutate() }} /></>
+  if (existingCourses.isError) return standalone ? <PwaTransferLogin onAuthenticated={() => completeSessionChange(null, true)} /> : <main className="state-screen"><h1>Откройте ссылку из письма</h1><p>Для входа в кабинет ученика нужна персональная ссылка доступа.</p></main>
+  return <>{serviceWorkerStatus}<CourseCatalog courses={existingCourses.data ?? []} standalone={standalone} onSelect={setCourseId} onLogout={() => { logout.mutate() }} /></>
 }

@@ -62,7 +62,7 @@ DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,https://example-tunnel.example
 ## Кабинет ученика
 
 1. После выдачи доступа письмо появляется в Mailpit: <http://localhost:8025>. Ссылка имеет не менее 256 бит случайности; в БД хранится только HMAC-хеш.
-2. Откройте ссылку в `/app/access/<token>`, подтвердите вход и просматривайте только выданный опубликованный snapshot курса.
+2. Откройте персональную ссылку `/app/#access=<token>`, подтвердите вход и просматривайте только выданный опубликованный snapshot курса. Fragment удаляется до первого API-запроса и не попадает в серверные access logs.
 3. Markdown, image, audio и video открываются через learner-scoped URL с `Cache-Control: private, no-store` и `Accept-Ranges: bytes`. В proxy mode URL остаётся same-origin; в presigned mode используется короткий signed URL. `object_key` в frontend не передаётся.
 4. Нажмите «Отметить урок завершённым». Прогресс сохраняется на сервере.
 5. Откройте ту же ссылку во втором browser context. Первая сессия при следующем API-запросе получает `SESSION_REVOKED` и показывает «Сессия открыта на другом устройстве»; второй context продолжает работать.

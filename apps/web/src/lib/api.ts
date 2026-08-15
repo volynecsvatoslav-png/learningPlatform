@@ -73,9 +73,12 @@ export type LearnerProgress = {
   completed_at: string | null
   updated_at: string
 }
+export type PwaSessionTransfer = { code: string; expires_at: string }
 export type MediaTransferMode = 'proxy' | 'presigned'
 
-let csrfToken = ''
+type CsrfScope = 'vendor' | 'learner'
+
+const csrfTokens: Record<CsrfScope, string> = { vendor: '', learner: '' }
 
 export class ApiError extends Error {
   status: number
@@ -90,13 +93,13 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, csrfScope: CsrfScope = 'vendor'): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('Accept', 'application/json')
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (options.method && options.method !== 'GET') {
-    if (!csrfToken) await csrf()
-    headers.set('X-CSRFToken', csrfToken)
+    if (!csrfTokens[csrfScope]) await csrf(csrfScope)
+    headers.set('X-CSRFToken', csrfTokens[csrfScope])
   }
   const response = await fetch(path, { ...options, credentials: 'include', headers })
   if (!response.ok) {
@@ -107,18 +110,23 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return (await response.json()) as T
 }
 
-export async function csrf(): Promise<string> {
-  const response = await fetch('/api/v1/vendor/csrf', { credentials: 'include' })
+export async function csrf(scope: CsrfScope = 'vendor'): Promise<string> {
+  const response = await fetch(`/api/v1/${scope}/csrf`, { credentials: 'include', cache: 'no-store' })
   const body = (await response.json()) as { csrfToken: string }
-  csrfToken = body.csrfToken
-  return csrfToken
+  csrfTokens[scope] = body.csrfToken
+  return csrfTokens[scope]
+}
+
+function resetCsrfTokens() {
+  csrfTokens.vendor = ''
+  csrfTokens.learner = ''
 }
 
 export const vendorApi = {
   mediaConfig: () => request<{ mode: MediaTransferMode }>('/api/v1/vendor/media/config'),
   login: async (email: string, password: string) => {
     const result = await request<{ ok: true }>('/api/v1/vendor/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
-    csrfToken = ''
+    resetCsrfTokens()
     return result
   },
   logout: () => request<{ ok: true }>('/api/v1/vendor/auth/logout', { method: 'POST' }),
@@ -144,7 +152,7 @@ export const vendorApi = {
   deleteMember: (id: string) => request<undefined>(`/api/v1/vendor/members/${id}`, { method: 'DELETE' }),
   uploadMedia: async (mode: MediaTransferMode, vendorId: string, file: File, kind: MediaAsset['kind'], onProgress?: (value: number) => void) => {
     if (mode === 'proxy') {
-      if (!csrfToken) await csrf()
+      if (!csrfTokens.vendor) await csrf('vendor')
       return new Promise<MediaAsset>((resolve, reject) => {
         const form = new FormData()
         form.append('vendor_id', vendorId)
@@ -153,7 +161,7 @@ export const vendorApi = {
         const xhr = new XMLHttpRequest()
         xhr.open('POST', '/api/v1/vendor/media/upload-file')
         xhr.withCredentials = true
-        xhr.setRequestHeader('X-CSRFToken', csrfToken)
+        xhr.setRequestHeader('X-CSRFToken', csrfTokens.vendor)
         xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100)) }
         xhr.timeout = 0
         const networkError = (code: string) => { reject(new ApiError(0, code, {}, 'Не удалось передать файл. Проверьте соединение и повторите попытку.')) }
@@ -199,16 +207,28 @@ export const vendorApi = {
 export const learnerApi = {
   access: (token: string) => request<{ email: string; course_title: string; ready: boolean }>(`/api/v1/learner/access/${encodeURIComponent(token)}`),
   login: async (token: string) => {
-    const result = await request<{ ok: true; course_id: string }>('/api/v1/learner/session', { method: 'POST', body: JSON.stringify({ token }) })
-    csrfToken = ''
+    const result = await request<{ ok: true; course_id: string }>('/api/v1/learner/session', { method: 'POST', body: JSON.stringify({ token }), cache: 'no-store' }, 'learner')
+    resetCsrfTokens()
     return result
   },
-  logout: () => request<{ ok: true }>('/api/v1/learner/logout', { method: 'POST' }),
+  createPwaTransfer: () => request<PwaSessionTransfer>('/api/v1/learner/pwa-transfer', { method: 'POST', cache: 'no-store' }, 'learner'),
+  consumePwaTransfer: async (code: string) => {
+    const result = await request<{ ok: true }>('/api/v1/learner/pwa-transfer/consume', { method: 'POST', body: JSON.stringify({ code }), cache: 'no-store' }, 'learner')
+    resetCsrfTokens()
+    return result
+  },
+  logout: async () => {
+    try {
+      return await request<{ ok: true }>('/api/v1/learner/logout', { method: 'POST' }, 'learner')
+    } finally {
+      resetCsrfTokens()
+    }
+  },
   courses: () => request<LearnerCourse[]>('/api/v1/learner/courses'),
   course: (id: string) => request<LearnerSnapshot>(`/api/v1/learner/courses/${id}`),
   offlineManifest: (id: string) => request<OfflineManifest>(`/api/v1/learner/courses/${id}/offline-manifest`),
-  offlineLicense: (id: string, revisionId: string) => request<OfflineLicense>(`/api/v1/learner/courses/${id}/offline-license`, { method: 'POST', body: JSON.stringify({ revision_id: revisionId }) }),
+  offlineLicense: (id: string, revisionId: string) => request<OfflineLicense>(`/api/v1/learner/courses/${id}/offline-license`, { method: 'POST', body: JSON.stringify({ revision_id: revisionId }) }, 'learner'),
   progress: (courseId: string) => request<LearnerProgress[]>(`/api/v1/learner/courses/${courseId}/progress`),
-  saveProgress: (courseId: string, lessonId: string, percent: number) => request(`/api/v1/learner/courses/${courseId}/progress/${lessonId}`, { method: 'POST', body: JSON.stringify({ percent, status: percent === 100 ? 'completed' : 'in_progress' }) }),
+  saveProgress: (courseId: string, lessonId: string, percent: number) => request(`/api/v1/learner/courses/${courseId}/progress/${lessonId}`, { method: 'POST', body: JSON.stringify({ percent, status: percent === 100 ? 'completed' : 'in_progress' }) }, 'learner'),
   streamUrl: (courseId: string, assetId: string) => request<{ url: string }>(`/api/v1/learner/courses/${courseId}/media/${assetId}/stream-url`),
 }

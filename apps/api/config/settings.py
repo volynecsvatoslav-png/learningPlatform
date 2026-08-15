@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from config.offline_keys import validate_offline_license_keys
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -83,6 +85,13 @@ DATABASES = {"default": postgres_database()}
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": REDIS_URL,
+        "KEY_PREFIX": "learning-platform",
+    }
+}
 
 MEDIA_S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
 MEDIA_S3_PUBLIC_ENDPOINT_URL = os.getenv("S3_PUBLIC_ENDPOINT_URL", MEDIA_S3_ENDPOINT_URL)
@@ -180,8 +189,17 @@ REST_FRAMEWORK = {
 
 VENDOR_AUTH_RATE_LIMIT = int(os.getenv("VENDOR_AUTH_RATE_LIMIT", "8"))
 VENDOR_AUTH_RATE_WINDOW_SECONDS = int(os.getenv("VENDOR_AUTH_RATE_WINDOW_SECONDS", "300"))
-OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64 = os.getenv(
-    "OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64",
-    "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3RpRURSd2ZQMEtqN2dCVUkKYmRUSTMybS9XckVrWGEraXFERDhrbWQ5bm55aFJBTkNBQVNYYmpZWTB4QUJCSnI0WkpXMVIrVTU1THFiV1RNUQo2TDJoRUR6eHhUSG0vMGNQNGtoamt2QTQzK1hadWMxU2FBY0NMSkREb3BBS1IvS1R6cWVyNGRIcQotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==",
+PWA_TRANSFER_PEPPER = os.getenv("PWA_TRANSFER_PEPPER") or SECRET_KEY
+PWA_TRANSFER_TTL_SECONDS = int(os.getenv("PWA_TRANSFER_TTL_SECONDS", "600"))
+PWA_TRANSFER_MAX_ATTEMPTS = int(os.getenv("PWA_TRANSFER_MAX_ATTEMPTS", "5"))
+PWA_TRANSFER_RATE_LIMIT = int(os.getenv("PWA_TRANSFER_RATE_LIMIT", "12"))
+PWA_TRANSFER_RATE_WINDOW_SECONDS = int(os.getenv("PWA_TRANSFER_RATE_WINDOW_SECONDS", "300"))
+(
+    OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64,
+    OFFLINE_LICENSE_PUBLIC_JWK,
+) = validate_offline_license_keys(
+    debug=DEBUG,
+    private_key_b64=os.getenv("OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64", ""),
+    public_jwk_json=os.getenv("VITE_OFFLINE_LICENSE_PUBLIC_JWK", ""),
 )
 OFFLINE_LICENSE_TTL_HOURS = int(os.getenv("OFFLINE_LICENSE_TTL_HOURS", "168"))

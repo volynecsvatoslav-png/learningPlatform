@@ -770,6 +770,54 @@ button.danger-button {
   padding-top: 2rem;
 }
 
+.pwa-transfer-panel {
+  display: grid;
+  max-width: 48rem;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding: 1.5rem;
+}
+
+.pwa-transfer-panel h2 {
+  font-size: clamp(1.75rem, 4vw, 2.75rem);
+}
+
+.pwa-transfer-panel .primary-action {
+  justify-self: start;
+}
+
+.transfer-code {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+}
+
+.transfer-code output {
+  flex-basis: 100%;
+  padding: 1rem;
+  border: 1px dashed #294936;
+  background: #fffdf7;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.transfer-code p {
+  margin: 0;
+}
+
+.transfer-login details {
+  margin-top: 2rem;
+}
+
+.transfer-login summary {
+  cursor: pointer;
+  color: #294936;
+  font-weight: 800;
+}
+
 .catalog-heading {
   max-width: 42rem;
 }

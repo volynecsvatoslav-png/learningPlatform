@@ -16,3 +16,7 @@ class LearnerProgressSerializer(serializers.ModelSerializer[LessonProgress]):
         if attrs.get("status") == "completed" and attrs.get("percent") != 100:
             raise serializers.ValidationError({"percent": "Completed progress must be 100%."})
         return attrs
+
+
+class PwaSessionTransferConsumeSerializer(serializers.Serializer[dict[str, str]]):
+    code = serializers.CharField(min_length=10, max_length=128, trim_whitespace=True)
