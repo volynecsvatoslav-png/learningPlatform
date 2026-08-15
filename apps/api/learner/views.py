@@ -161,6 +161,16 @@ def _offline_asset_ids(snapshot: dict[str, Any]) -> set[str]:
     }
 
 
+def _offline_available(snapshot: dict[str, Any]) -> bool:
+    return any(
+        unit.get("type") == "text"
+        or (unit.get("media_asset_id") and unit.get("is_downloadable") is True)
+        for module in snapshot.get("modules", [])
+        for lesson in module.get("lessons", [])
+        for unit in lesson.get("content_units", [])
+    )
+
+
 def _revision_for_course(course: Course, revision_id: object) -> CourseRevision:
     try:
         parsed_revision_id = uuid.UUID(str(revision_id))
@@ -271,22 +281,37 @@ class LearnerOfflineManifestView(LearnerAPIView):
 class LearnerOfflineLicenseView(LearnerAPIView):
     def post(self, request: Request, course_id: uuid.UUID) -> Response:
         enrollment = _active_enrollment(_learner_user(request), course_id)
-        revision_id = request.data.get("revision_id") or enrollment.course.current_revision_id
-        revision = _revision_for_course(enrollment.course, revision_id)
+        current_revision = enrollment.course.current_revision
+        if current_revision is None:
+            raise Http404
+        requested_revision_id = request.data.get("revision_id") or current_revision.id
+        try:
+            parsed_revision_id = uuid.UUID(str(requested_revision_id))
+        except ValueError as error:
+            raise Http404 from error
+        if parsed_revision_id != current_revision.id:
+            response = Response(
+                {
+                    "code": "OFFLINE_REVISION_OUTDATED",
+                    "current_revision_id": str(current_revision.id),
+                    "offline_available": _offline_available(current_revision.snapshot_json),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+            response["Cache-Control"] = "private, no-store"
+            return response
         license_data = issue_offline_license(
             learner=_learner_user(request),
             course=enrollment.course,
-            revision=revision,
+            revision=current_revision,
             session=cast(LearnerSession, request.auth),
         )
         response = Response(
             {
                 **license_data,
-                "current_revision_id": str(enrollment.course.current_revision_id),
-                "current_revision": enrollment.course.current_revision.revision_number
-                if enrollment.course.current_revision
-                else None,
-                "update_available": revision.id != enrollment.course.current_revision_id,
+                "current_revision_id": str(current_revision.id),
+                "current_revision": current_revision.revision_number,
+                "update_available": False,
             }
         )
         response["Cache-Control"] = "private, no-store"

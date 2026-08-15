@@ -1,8 +1,10 @@
 import { ApiError, learnerApi, type LearnerSnapshot } from '../lib/api'
-import { createOfflineKey, decryptChunk, encryptChunk, verifyOfflineLicense } from './crypto'
-import { getKey } from './db'
+import fixture from '../../../api/learner/tests/fixtures/offline_license.json'
+import { createOfflineKey, decodeLicenseClaims, decryptChunk, encryptChunk, verifyOfflineLicense } from './crypto'
+import { getChunks, getKey } from './db'
 import { downloadOfflineCourse, getOfflinePackage, offlineMediaUrl, readOfflineSnapshot, syncOfflineCourse } from './offline-course'
-import type { OfflineLicense, OfflineLicenseClaims, OfflineManifest } from './types'
+import { OFFLINE_LICENSE_PUBLIC_JWK } from './license-key'
+import type { OfflineLicense, OfflineManifest } from './types'
 
 const snapshot: LearnerSnapshot = {
   title: 'Offline course',
@@ -17,39 +19,15 @@ const snapshot: LearnerSnapshot = {
   }] }],
 }
 
-function base64Url(value: Uint8Array): string {
-  let binary = ''
-  value.forEach((byte) => { binary += String.fromCharCode(byte) })
-  return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-}
-
-async function signedLicense(revisionId: string, options: { expired?: boolean; updateAvailable?: boolean; currentRevisionId?: string } = {}): Promise<OfflineLicense> {
-  const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
-  const now = Math.floor(Date.now() / 1000)
-  const claims: OfflineLicenseClaims = {
-    license_id: 'license-1',
-    learner_id: 'learner-1',
-    course_id: 'course-1',
-    revision_id: revisionId,
-    revision: revisionId === 'revision-1' ? 1 : 2,
-    device_id: 'device-1',
-    session_id: 'session-1',
-    issued_at: now,
-    expires_at: options.expired ? now - 1 : now + 604800,
-    iat: now,
-    exp: options.expired ? now - 1 : now + 604800,
-  }
-  const header = base64Url(new TextEncoder().encode(JSON.stringify({ alg: 'ES256', typ: 'JWT' })))
-  const payload = base64Url(new TextEncoder().encode(JSON.stringify(claims)))
-  const signature = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, new TextEncoder().encode(`${header}.${payload}`)))
-  const token = `${header}.${payload}.${base64Url(signature)}`
+function signedLicense(revisionId: 'revision-1' | 'revision-2'): OfflineLicense {
+  const token = fixture.tokens[revisionId]
+  const claims = decodeLicenseClaims(token)
   return {
     token,
     claims,
-    verification_key: await crypto.subtle.exportKey('jwk', keys.publicKey),
-    current_revision_id: options.currentRevisionId ?? revisionId,
-    current_revision: options.currentRevisionId === 'revision-2' ? 2 : claims.revision,
-    update_available: options.updateAvailable ?? false,
+    current_revision_id: revisionId,
+    current_revision: claims.revision,
+    update_available: false,
   }
 }
 
@@ -59,7 +37,7 @@ function manifest(revisionId = 'revision-1'): OfflineManifest {
     revision_id: revisionId,
     revision: revisionId === 'revision-1' ? 1 : 2,
     snapshot,
-    assets: [{ id: 'asset-1', content_type: 'video/mp4', size_bytes: 6, sha256: '0'.repeat(64), chunk_size: 4, chunk_count: 2 }],
+    assets: [{ id: 'asset-1', content_type: 'video/mp4', size_bytes: 6, sha256: '7192385c3c0605de55bb9476ce1d90748190ecb32a8eed7f5207b30cf6a1fe89', chunk_size: 4, chunk_count: 2 }],
     total_size: 6,
   }
 }
@@ -111,8 +89,12 @@ describe('offline course storage', () => {
   })
 
   it('rejects an expired signed offline license', async () => {
-    const license = await signedLicense('revision-1', { expired: true })
-    await expect(verifyOfflineLicense(license.token, license.verification_key)).rejects.toThrow('OFFLINE_LICENSE_EXPIRED')
+    await expect(verifyOfflineLicense(fixture.tokens.expired, { courseId: 'course-1', revisionId: 'revision-1' })).rejects.toThrow('OFFLINE_LICENSE_EXPIRED')
+  })
+
+  it('verifies the Django ES256 fixture with the pinned WebCrypto key', async () => {
+    expect(OFFLINE_LICENSE_PUBLIC_JWK).toMatchObject(fixture.publicJwk)
+    await expect(verifyOfflineLicense(fixture.tokens['revision-1'], { courseId: 'course-1', revisionId: 'revision-1', learnerId: 'learner-1', sessionId: 'session-1' })).resolves.toMatchObject({ learner_id: 'learner-1', session_id: 'session-1' })
   })
 
   it('reports insufficient private storage before downloading media', async () => {
@@ -127,7 +109,7 @@ describe('offline course storage', () => {
 
   it('downloads encrypted chunks with progress and reads the course without network', async () => {
     vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
-    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(await signedLicense('revision-1'))
+    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
     const source = new Uint8Array([1, 2, 3, 4, 5, 6])
     vi.stubGlobal('fetch', chunkFetch(source))
     const progress: Array<[number, number]> = []
@@ -142,9 +124,49 @@ describe('offline course storage', () => {
     expect(JSON.stringify(result)).not.toContain('s3')
   })
 
+  it('rejects equal-sized media with a mismatched SHA-256 and preserves a ready package', async () => {
+    vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
+    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
+    vi.stubGlobal('fetch', chunkFetch(new Uint8Array([1, 2, 3, 4, 5, 6])))
+    const ready = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
+    vi.stubGlobal('fetch', chunkFetch(new Uint8Array([6, 5, 4, 3, 2, 1])))
+
+    await expect(downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)).rejects.toMatchObject({ code: 'OFFLINE_CHECKSUM_MISMATCH' })
+    expect((await getOfflinePackage('course-1'))?.packageId).toBe(ready.packageId)
+    expect(await getKey(ready.packageId)).toBeDefined()
+  })
+
+  it('stores text-only snapshots without media chunks', async () => {
+    const textManifest = { ...manifest(), assets: [], total_size: 0, snapshot: { ...snapshot, modules: [{ id: 'module-1', title: 'Module', description: '', lessons: [{ id: 'lesson-1', title: 'Text', description: '', content_units: [{ id: 'text-1', type: 'text' as const, title: '', position: 1, text_markdown: '# Offline', media_asset_id: null, is_downloadable: false }] }] }] } }
+    vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(textManifest)
+    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
+
+    const result = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
+
+    expect(result.assets).toEqual([])
+    expect(await readOfflineSnapshot('course-1')).toMatchObject({ title: 'Offline course' })
+  })
+
+  it('falls back per chunk to IndexedDB when OPFS writing fails', async () => {
+    const file = { createWritable: vi.fn().mockRejectedValue(new Error('OPFS write failed')) }
+    const directory = { getFileHandle: vi.fn().mockResolvedValue(file) }
+    const base = { getDirectoryHandle: vi.fn().mockResolvedValue(directory) }
+    const root = { getDirectoryHandle: vi.fn().mockResolvedValue(base) }
+    Object.defineProperty(navigator, 'storage', { configurable: true, value: { estimate: vi.fn().mockResolvedValue({ quota: 1024 * 1024, usage: 0 }), persist: vi.fn(), getDirectory: vi.fn().mockResolvedValue(root) } })
+    vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
+    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
+    vi.stubGlobal('fetch', chunkFetch(new Uint8Array([1, 2, 3, 4, 5, 6])))
+
+    const result = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
+    const chunks = await getChunks(result.packageId)
+
+    expect(result.storageKind).toBe('mixed')
+    expect(chunks.every((chunk) => Boolean(chunk.ciphertext?.byteLength) && !chunk.opfsPath)).toBe(true)
+  })
+
   it('removes content and its local key when access is revoked during sync', async () => {
     vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
-    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(await signedLicense('revision-1'))
+    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
     vi.stubGlobal('fetch', chunkFetch(new Uint8Array([1, 2, 3, 4, 5, 6])))
     const downloaded = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
     vi.spyOn(learnerApi, 'offlineLicense').mockRejectedValue(new ApiError(404, 'ACCESS_REVOKED'))
@@ -156,19 +178,30 @@ describe('offline course storage', () => {
 
   it('keeps the old revision until a complete update replaces it', async () => {
     const manifestSpy = vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
-    const licenseSpy = vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(await signedLicense('revision-1'))
+    const licenseSpy = vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
     vi.stubGlobal('fetch', chunkFetch(new Uint8Array([1, 2, 3, 4, 5, 6])))
     const first = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
-    licenseSpy.mockResolvedValue(await signedLicense('revision-1', { updateAvailable: true, currentRevisionId: 'revision-2' }))
+    licenseSpy.mockRejectedValue(new ApiError(409, 'OFFLINE_REVISION_OUTDATED', { code: 'OFFLINE_REVISION_OUTDATED', current_revision_id: 'revision-2', offline_available: true }))
     const update = await syncOfflineCourse('course-1')
     expect(update?.revisionId).toBe('revision-1')
     expect(update?.updateAvailable).toBe(true)
 
     manifestSpy.mockResolvedValue(manifest('revision-2'))
-    licenseSpy.mockResolvedValue(await signedLicense('revision-2'))
+    licenseSpy.mockResolvedValue(signedLicense('revision-2'))
     const second = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
     expect(second.revisionId).toBe('revision-2')
     expect(await getKey(first.packageId)).toBeUndefined()
     expect(await getKey(second.packageId)).toBeDefined()
+  })
+
+  it('deletes an outdated package when the current revision has no offline content', async () => {
+    vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
+    const licenseSpy = vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
+    vi.stubGlobal('fetch', chunkFetch(new Uint8Array([1, 2, 3, 4, 5, 6])))
+    await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
+    licenseSpy.mockRejectedValue(new ApiError(409, 'OFFLINE_REVISION_OUTDATED', { code: 'OFFLINE_REVISION_OUTDATED', current_revision_id: 'revision-2', offline_available: false }))
+
+    await expect(syncOfflineCourse('course-1')).resolves.toBeUndefined()
+    expect(await getOfflinePackage('course-1')).toBeUndefined()
   })
 })

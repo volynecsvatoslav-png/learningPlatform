@@ -1,4 +1,5 @@
 import type { OfflineLicenseClaims } from './types'
+import { OFFLINE_LICENSE_PUBLIC_JWK } from './license-key'
 
 const encoder = new TextEncoder()
 
@@ -34,12 +35,14 @@ export function decodeLicenseClaims(token: string): OfflineLicenseClaims {
   return JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as OfflineLicenseClaims
 }
 
-export async function verifyOfflineLicense(token: string, verificationKey: JsonWebKey, now = Date.now()): Promise<OfflineLicenseClaims> {
+export async function verifyOfflineLicense(token: string, expected: { courseId: string; revisionId: string; learnerId?: string; sessionId?: string }, now = Date.now()): Promise<OfflineLicenseClaims> {
   const parts = token.split('.')
   if (parts.length !== 3) throw new Error('OFFLINE_LICENSE_INVALID')
   const [header, payload, signature] = parts
   if (!header || !payload || !signature) throw new Error('OFFLINE_LICENSE_INVALID')
-  const key = await crypto.subtle.importKey('jwk', verificationKey, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+  const protectedHeader = JSON.parse(new TextDecoder().decode(decodeBase64Url(header))) as { alg?: unknown }
+  if (protectedHeader.alg !== 'ES256') throw new Error('OFFLINE_LICENSE_INVALID')
+  const key = await crypto.subtle.importKey('jwk', OFFLINE_LICENSE_PUBLIC_JWK, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
   const valid = await crypto.subtle.verify(
     { name: 'ECDSA', hash: 'SHA-256' },
     key,
@@ -48,6 +51,13 @@ export async function verifyOfflineLicense(token: string, verificationKey: JsonW
   )
   if (!valid) throw new Error('OFFLINE_LICENSE_INVALID')
   const claims = decodeLicenseClaims(token)
+  const issuedAt = claims.iat * 1000
+  if (!Number.isSafeInteger(claims.iat) || issuedAt > now + 5 * 60 * 1000) throw new Error('OFFLINE_LICENSE_INVALID')
   if (claims.expires_at * 1000 <= now) throw new Error('OFFLINE_LICENSE_EXPIRED')
+  if (claims.exp !== claims.expires_at || claims.issued_at !== claims.iat) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (!claims.learner_id || !claims.session_id) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (claims.course_id !== expected.courseId || claims.revision_id !== expected.revisionId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (expected.learnerId && claims.learner_id !== expected.learnerId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (expected.sessionId && claims.session_id !== expected.sessionId) throw new Error('OFFLINE_LICENSE_INVALID')
   return claims
 }

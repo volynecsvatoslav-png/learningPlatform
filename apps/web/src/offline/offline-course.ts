@@ -1,4 +1,5 @@
 import { ApiError, learnerApi, type LearnerCourse, type LearnerSnapshot } from '../lib/api'
+import { createSHA256 } from 'hash-wasm'
 import { chunkAad, createOfflineKey, decryptChunk, encryptChunk, verifyOfflineLicense } from './crypto'
 import { deleteChunks, deleteKey, deletePackageRecord, getKey, getPackage, getPackages, putChunk, putKey, putPackage } from './db'
 import type { OfflineLicense, OfflineManifest, OfflinePackage } from './types'
@@ -75,24 +76,26 @@ export function formatBytes(value: number): string {
 
 export async function downloadOfflineCourse(courseId: string, onProgress: (loaded: number, total: number) => void, signal: AbortSignal): Promise<OfflinePackage> {
   const manifest = await learnerApi.offlineManifest(courseId)
-  if (manifest.assets.length === 0) throw new OfflineDownloadError('OFFLINE_NOT_ALLOWED', 'В курсе нет блоков, разрешённых для офлайн-просмотра.')
   await ensureQuota(manifest.total_size)
   const storage = navigator.storage as StorageManager | undefined
   if (storage) await storage.persist()
   const license = await learnerApi.offlineLicense(courseId, manifest.revision_id)
-  const claims = await verifyOfflineLicense(license.token, license.verification_key)
+  const claims = await verifyOfflineLicense(license.token, { courseId, revisionId: manifest.revision_id })
   if (claims.course_id !== courseId || claims.revision_id !== manifest.revision_id) throw new OfflineDownloadError('OFFLINE_LICENSE_INVALID', 'Сервер вернул некорректную офлайн-лицензию.')
 
-  const packageId = `${courseId}:${manifest.revision_id}`
+  const packageId = `${courseId}:${manifest.revision_id}:attempt:${crypto.randomUUID()}`
   const previous = await getPackage(courseId)
   const key = await createOfflineKey()
   await putKey(packageId, key)
   const snapshotEncrypted = await encryptChunk(key, encoder.encode(JSON.stringify(manifest.snapshot)), chunkAad(courseId, manifest.revision_id, 'snapshot', 0))
-  const storageKind = await getOpfsRoot() ? 'opfs' : 'idb'
+  let storageKind: OfflinePackage['storageKind'] = await getOpfsRoot() ? 'opfs' : 'idb'
   let loaded = 0
   onProgress(loaded, manifest.total_size)
+  let committed = false
   try {
     for (const asset of manifest.assets) {
+      const hasher = await createSHA256()
+      hasher.init()
       for (let index = 0; index < asset.chunk_count; index += 1) {
         if (signal.aborted) throw new DOMException('Download aborted', 'AbortError')
         const start = index * asset.chunk_size
@@ -106,16 +109,25 @@ export async function downloadOfflineCourse(courseId: string, onProgress: (loade
         if (!response.ok) throw new ApiError(response.status, 'OFFLINE_CHUNK_FAILED')
         const plain = await response.arrayBuffer()
         if (plain.byteLength !== end - start + 1) throw new OfflineDownloadError('OFFLINE_CHUNK_INVALID', 'Сервер вернул повреждённый блок медиа.')
+        hasher.update(new Uint8Array(plain))
         const encrypted = await encryptChunk(key, plain, chunkAad(courseId, manifest.revision_id, asset.id, index))
         const id = `${packageId}:${asset.id}:${String(index)}`
-        if (storageKind === 'opfs') {
-          const opfsPath = await writeOpfsChunk(packageId, `${asset.id}-${String(index)}`, encrypted.ciphertext)
-          await putChunk({ id, packageId, assetId: asset.id, index, iv: encrypted.iv, opfsPath })
+        if (storageKind !== 'idb') {
+          try {
+            const opfsPath = await writeOpfsChunk(packageId, `${asset.id}-${String(index)}`, encrypted.ciphertext)
+            await putChunk({ id, packageId, assetId: asset.id, index, iv: encrypted.iv, opfsPath })
+          } catch {
+            storageKind = 'mixed'
+            await putChunk({ id, packageId, assetId: asset.id, index, iv: encrypted.iv, ciphertext: encrypted.ciphertext })
+          }
         } else {
           await putChunk({ id, packageId, assetId: asset.id, index, iv: encrypted.iv, ciphertext: encrypted.ciphertext })
         }
         loaded += plain.byteLength
         onProgress(loaded, manifest.total_size)
+      }
+      if (hasher.digest('hex').toLowerCase() !== asset.sha256.toLowerCase()) {
+        throw new OfflineDownloadError('OFFLINE_CHECKSUM_MISMATCH', 'Контрольная сумма медиа не совпала.')
       }
     }
     const offlinePackage: OfflinePackage = {
@@ -127,7 +139,8 @@ export async function downloadOfflineCourse(courseId: string, onProgress: (loade
       shortDescription: manifest.snapshot.short_description ?? '',
       licenseToken: license.token,
       licenseClaims: claims,
-      verificationKey: license.verification_key,
+      learnerId: claims.learner_id,
+      sessionId: claims.session_id,
       snapshotIv: snapshotEncrypted.iv,
       snapshotCiphertext: snapshotEncrypted.ciphertext,
       assets: manifest.assets,
@@ -138,10 +151,11 @@ export async function downloadOfflineCourse(courseId: string, onProgress: (loade
       createdAt: Date.now(),
     }
     await putPackage(offlinePackage)
-    if (previous && previous.packageId !== packageId) await deletePackageData(previous.packageId)
+    committed = true
+    if (previous) await deletePackageData(previous.packageId).catch(() => undefined)
     return offlinePackage
   } catch (error) {
-    await deletePackageData(packageId)
+    if (!committed) await deletePackageData(packageId)
     throw error
   }
 }
@@ -179,11 +193,20 @@ export async function syncOfflineCourse(courseId: string): Promise<OfflinePackag
   if (!offlinePackage) return undefined
   try {
     const license = await learnerApi.offlineLicense(courseId, offlinePackage.revisionId)
-    const claims = await verifyOfflineLicense(license.token, license.verification_key)
-    const updated = { ...offlinePackage, licenseToken: license.token, licenseClaims: claims, verificationKey: license.verification_key, updateAvailable: license.update_available }
+    const claims = await verifyOfflineLicense(license.token, { courseId, revisionId: offlinePackage.revisionId, learnerId: offlinePackage.learnerId, sessionId: offlinePackage.sessionId })
+    const updated = { ...offlinePackage, licenseToken: license.token, licenseClaims: claims, updateAvailable: false }
     await putPackage(updated)
     return updated
   } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && error.code === 'OFFLINE_REVISION_OUTDATED') {
+      if (error.body.offline_available === false) {
+        await deleteOfflineCourse(courseId)
+        return undefined
+      }
+      const outdated = { ...offlinePackage, updateAvailable: true }
+      await putPackage(outdated)
+      return outdated
+    }
     if (error instanceof ApiError && [401, 403, 404].includes(error.status)) await deleteOfflineCourse(courseId)
     throw error
   }

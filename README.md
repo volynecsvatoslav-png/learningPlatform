@@ -5,7 +5,7 @@
 ## Требования
 
 - Docker Desktop с Compose v2;
-- свободные порты `5173`, `8000`, `8025`, `9000`, `9001`, `5432`.
+- свободные локальные порты `5173`, `8000`, `8025`, `9000`, `9001`.
 
 ## Запуск
 
@@ -46,6 +46,10 @@ DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,example-tunnel.example
 VITE_ALLOWED_HOSTS=localhost,127.0.0.1,example-tunnel.example
 DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,https://example-tunnel.example
 ```
+
+### Статический HTTPS-туннель
+
+Для удалённого просмотра используется `https://learningplatform.ru.tuna.am`. Туннель должен направляться только на локальный `http://127.0.0.1:5173`: API и медиа остаются same-origin и проходят через Vite proxy по `/api`; порты API, PostgreSQL, Mailpit и MinIO наружу не публикуются. Укажите домен в `PUBLIC_APP_URL`, `VITE_ALLOWED_HOSTS`, `DJANGO_ALLOWED_HOSTS` и `DJANGO_CSRF_TRUSTED_ORIGINS` без wildcard, затем пересоздайте контейнеры. После изменения домена переотправьте ученику ссылку доступа, чтобы новая ссылка содержала актуальный публичный адрес.
 
 ## Кабинет вендора
 
@@ -110,7 +114,8 @@ docker run --rm -it --network host -v "${PWD}:/work" -w /work -e E2E_OWNER_EMAIL
 ## Ограничения
 
 - Офлайн-пакеты работают только внутри установленной PWA: AES-GCM chunks хранятся в OPFS/IndexedDB и требуют действующую семидневную offline license. Это не абсолютная DRM-защита.
-- Docker frontend запускает Vite в development mode, где service worker не регистрируется; офлайн-воспроизведение проверяется в production build установленной PWA.
+- После первого открытия `/app/` обновите страницу один раз, чтобы Service Worker начал контролировать приложение. Интерфейс покажет «Офлайн-функции готовы» после активации.
+- В локальном Docker Service Worker включён через `VITE_ENABLE_SERVICE_WORKER=true`; для production используется стандартный `import.meta.env.PROD`.
 - Learner session использует серверную Django session cookie; `device_id`, User-Agent и IP не используются как фактор блокировки.
 - E2E bootstrap доступен только при `DEBUG=true` и `E2E_BOOTSTRAP_ENABLED=true`; используйте его только на одноразовой чистой базе.
 - Rate limits, полный CSP/CORS hardening, production deployment и MFA относятся к итерации 1.5. MFA обязательно перед реальными продажами.

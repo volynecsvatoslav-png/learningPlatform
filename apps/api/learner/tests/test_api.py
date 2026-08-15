@@ -1,12 +1,16 @@
+import json
 import secrets
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import jwt
 import pytest
 from django.test import Client
 from django.utils import timezone
 
 from accounts.models import User
 from learner.models import AccessLink, Enrollment, LearnerSession, LessonProgress, hash_access_token
+from learner.offline_license import verification_jwk
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import publish_course
 from media_assets.models import MediaAsset
@@ -315,8 +319,8 @@ def test_offline_manifest_license_revision_and_revocation(client: Client) -> Non
         == 7 * 24 * 60 * 60
     )
     assert license_data["token"].count(".") == 2
-    assert license_data["verification_key"]["crv"] == "P-256"
-    assert license_data["verification_key"]["ext"] is True
+    assert "verification_key" not in license_data
+    assert jwt.get_unverified_header(license_data["token"])["alg"] == "ES256"
 
     storage = Mock()
     storage.head.return_value = {"ContentLength": 10}
@@ -334,9 +338,10 @@ def test_offline_manifest_license_revision_and_revocation(client: Client) -> Non
         data={"revision_id": str(allowed_revision.id)},
         content_type="application/json",
     )
-    assert update_response.status_code == 200
+    assert update_response.status_code == 409
+    assert update_response.json()["code"] == "OFFLINE_REVISION_OUTDATED"
     assert update_response.json()["current_revision_id"] == str(forbidden_revision.id)
-    assert update_response.json()["update_available"] is True
+    assert update_response.json()["offline_available"] is False
     assert client.get(manifest_url).json()["assets"] == []
     forbidden_url = (
         f"/api/v1/learner/courses/{course.id}/offline-media/{forbidden_revision.id}/{asset.id}"
@@ -355,3 +360,38 @@ def test_offline_manifest_license_revision_and_revocation(client: Client) -> Non
         ).status_code
         == 404
     )
+
+
+def test_shared_offline_license_fixture_matches_backend_public_key() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "offline_license.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    assert fixture["publicJwk"] == verification_jwk()
+    claims = jwt.decode(
+        fixture["tokens"]["revision-1"],
+        jwt.algorithms.ECAlgorithm.from_jwk(fixture["publicJwk"]),
+        algorithms=["ES256"],
+        options={"verify_exp": False},
+    )
+    assert claims["revision_id"] == "revision-1"
+
+
+def test_outdated_offline_license_reports_current_text_course_available(client: Client) -> None:
+    _, course, _, token = make_access()
+    course.refresh_from_db()
+    previous_revision_id = course.current_revision_id
+    current_revision = publish_course(course)
+    session_login(client, token)
+
+    response = client.post(
+        f"/api/v1/learner/courses/{course.id}/offline-license",
+        data={"revision_id": str(previous_revision_id)},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "OFFLINE_REVISION_OUTDATED",
+        "current_revision_id": str(current_revision.id),
+        "offline_available": True,
+    }

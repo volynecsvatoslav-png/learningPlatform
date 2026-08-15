@@ -2,7 +2,8 @@
   "name": "learning-platform-e2e",
   "private": true,
   "scripts": {
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:pwa": "playwright test --config=playwright.pwa.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.55.0"

@@ -180,6 +180,24 @@ describe('VendorPage', () => {
     expect(screen.queryByText('Разрешить скачивание')).not.toBeInTheDocument()
   })
 
+  it('shows publication detail returned by the backend', async () => {
+    const course = { id: 'course-1', title: 'Invalid course', slug: 'invalid', short_description: '', description_markdown: '', cover_asset_id: null, status: 'draft', offline_revision: 1, published_revision: null }
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/api/v1/vendor/me')) return response({ email: 'owner@example.com', vendors: [{ id: 'vendor-1', name: 'Alpha', role: 'owner' }] })
+      if (url.endsWith('/api/v1/vendor/courses?vendor_id=vendor-1')) return response([course])
+      if (url.endsWith('/api/v1/vendor/courses/course-1/structure')) return response({ modules: [] })
+      if (url.endsWith('/api/v1/vendor/csrf')) return response({ csrfToken: 'csrf-token' })
+      if (url.endsWith('/api/v1/vendor/courses/course-1/publish') && init?.method === 'POST') return response({ code: 'PUBLICATION_INVALID', detail: 'Добавьте хотя бы один опубликованный урок.' }, 422)
+      return workspaceResponse(url)
+    }))
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /Invalid course/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /Опубликовать ревизию/i }))
+
+    expect(await screen.findByText('Добавьте хотя бы один опубликованный урок.')).toBeInTheDocument()
+  })
+
   it('uploads a video in the editor, shows validation, and selects it when ready', async () => {
     class FakeXHR {
       upload = { onprogress: () => {} }

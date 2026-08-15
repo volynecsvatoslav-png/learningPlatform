@@ -39,14 +39,27 @@ function useOnlineStatus() {
   return online
 }
 
-function MediaUnit({ courseId, unit, watermark, offlinePackage, online }: { courseId: string; unit: ContentUnit; watermark: string; offlinePackage?: OfflinePackage; online: boolean }) {
-  const hasOfflineAsset = Boolean(offlinePackage?.assets.some((asset) => asset.id === unit.media_asset_id))
-  const useOfflineMedia = !online && hasOfflineAsset
-  const media = useQuery({ queryKey: ['learner-media', courseId, unit.media_asset_id], queryFn: () => learnerApi.streamUrl(courseId, unit.media_asset_id ?? ''), enabled: Boolean(unit.media_asset_id) && !useOfflineMedia })
-  const source = useOfflineMedia ? offlineMediaUrl(courseId, unit.media_asset_id ?? '') : media.data?.url
-  if (useOfflineMedia && offlinePackage && offlinePackage.licenseClaims.expires_at * 1000 <= Date.now()) return <p className="form-error">Подключитесь к интернету для продления офлайн-доступа.</p>
-  if (media.isLoading) return <p className="muted">Готовим воспроизведение...</p>
-  if (media.isError || !source) return <p className="form-error">Медиа недоступно.</p>
+function useServiceWorkerReady() {
+  const enabled = import.meta.env.PROD || import.meta.env.VITE_ENABLE_SERVICE_WORKER === 'true'
+  const [ready, setReady] = useState('serviceWorker' in navigator && Boolean(navigator.serviceWorker.controller))
+  useEffect(() => {
+    if (!enabled || !('serviceWorker' in navigator)) return
+    const update = () => { setReady(Boolean(navigator.serviceWorker.controller)) }
+    navigator.serviceWorker.addEventListener('controllerchange', update)
+    void navigator.serviceWorker.ready.then(update)
+    return () => { navigator.serviceWorker.removeEventListener('controllerchange', update) }
+  }, [enabled])
+  return enabled && ready
+}
+
+export function MediaUnit({ courseId, unit, watermark, offlinePackage, offlineAssetAvailable, snapshotLoadedOffline }: { courseId: string; unit: ContentUnit; watermark: string; offlinePackage?: OfflinePackage; offlineAssetAvailable: boolean; snapshotLoadedOffline: boolean }) {
+  const media = useQuery({ queryKey: ['learner-media', courseId, unit.media_asset_id], queryFn: () => learnerApi.streamUrl(courseId, unit.media_asset_id ?? ''), enabled: Boolean(unit.media_asset_id), networkMode: 'always', retry: false })
+  const offlineSource = offlineAssetAvailable ? offlineMediaUrl(courseId, unit.media_asset_id ?? '') : undefined
+  const source = media.data?.url ?? offlineSource
+  if (!media.data && offlineSource && offlinePackage && offlinePackage.licenseClaims.expires_at * 1000 <= Date.now()) return <p className="form-error">Подключитесь к интернету для продления офлайн-доступа.</p>
+  if (media.isLoading && !source) return <p className="muted">Готовим воспроизведение...</p>
+  if (!source && snapshotLoadedOffline && !offlineAssetAvailable) return <p className="form-error">Этот материал доступен только при подключении к интернету</p>
+  if (!source) return <p className="form-error">Медиа недоступно.</p>
   if (unit.type === 'image') return <img className="lesson-image" src={source} alt={unit.title} />
   if (unit.type === 'audio') return <audio controls controlsList="nodownload noremoteplayback" onContextMenu={(event) => { event.preventDefault() }} src={source} />
   return <VideoMedia src={source} watermark={watermark} />
@@ -67,6 +80,7 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
   const [lessonId, setLessonId] = useState<string | null>(null)
   const [recordedLessonId, setRecordedLessonId] = useState<string | null>(null)
   const [offlinePackage, setOfflinePackage] = useState<OfflinePackage>()
+  const [offlinePackageLoaded, setOfflinePackageLoaded] = useState(false)
   const [downloadProgress, setDownloadProgress] = useState(0)
   const [downloadSize, setDownloadSize] = useState(0)
   const [downloadError, setDownloadError] = useState('')
@@ -75,19 +89,22 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
   const online = useOnlineStatus()
   const queryClient = useQueryClient()
   const course = useQuery({ queryKey: ['learner-course', courseId], networkMode: 'always', queryFn: async () => {
-    try { return await learnerApi.course(courseId) } catch (error) { const local = await readOfflineSnapshot(courseId); if (local) return local; throw error instanceof Error ? error : new Error('Не удалось открыть курс.') }
+    try { return { snapshot: await learnerApi.course(courseId), loadedFromOffline: false } } catch (error) { const local = await readOfflineSnapshot(courseId); if (local) return { snapshot: local, loadedFromOffline: true }; throw error instanceof Error ? error : new Error('Не удалось открыть курс.') }
   } })
   const progress = useQuery({ queryKey: ['learner-progress', courseId], networkMode: 'always', queryFn: async () => {
     try { return await learnerApi.progress(courseId) } catch (error) { if (await getOfflinePackage(courseId)) return []; throw error instanceof Error ? error : new Error('Не удалось загрузить прогресс.') }
   } })
-  const offlineInfo = useQuery({ queryKey: ['learner-offline-manifest', courseId], queryFn: () => learnerApi.offlineManifest(courseId), enabled: online && Boolean(course.data) })
+  const offlineInfo = useQuery({ queryKey: ['learner-offline-manifest', courseId], queryFn: () => learnerApi.offlineManifest(courseId), enabled: online && Boolean(course.data?.snapshot) })
   const save = useMutation({ mutationFn: ({ id, percent }: { id: string; percent: number }) => learnerApi.saveProgress(courseId, id, percent), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['learner-progress', courseId] }) } })
-  const snapshot = course.data
+  const snapshot = course.data?.snapshot
   const activeLessonId = snapshot && progress.data ? lessonId ?? continuationLesson(snapshot, progress.data) : null
   const lesson = snapshot?.modules.flatMap((module) => module.lessons).find((item) => item.id === activeLessonId)
   const lessonProgress = progress.data?.find((row) => row.lesson_id === lesson?.id)
   useEffect(() => {
-    void getOfflinePackage(courseId).then(setOfflinePackage)
+    setOfflinePackageLoaded(false)
+    void getOfflinePackage(courseId)
+      .then(setOfflinePackage)
+      .finally(() => { setOfflinePackageLoaded(true) })
   }, [courseId])
   useEffect(() => {
     if (online) void syncOfflineCourse(courseId).then(setOfflinePackage).catch(() => { void getOfflinePackage(courseId).then(setOfflinePackage) })
@@ -101,10 +118,12 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
   if (course.isLoading || progress.isLoading) return <main className="loading-screen">Загрузка курса...</main>
   const requestError = course.error ?? progress.error
   if (requestError instanceof ApiError && requestError.code === 'SESSION_REVOKED') return <main className="state-screen"><h1>Сессия открыта на другом устройстве</h1><p>Доступ открыт на другом устройстве. Откройте ссылку там, где хотите продолжить обучение.</p></main>
-  if (course.isError || progress.isError || !course.data || !progress.data) return <main className="state-screen"><h1>Курс недоступен</h1><p>Доступ отозван или курс больше не опубликован.</p><button className="text-button" onClick={onBack}>Вернуться к курсам</button></main>
-  const currentSnapshot = course.data
+  if (course.isError || progress.isError || !course.data?.snapshot || !progress.data) return <main className="state-screen"><h1>Курс недоступен</h1><p>Доступ отозван или курс больше не опубликован.</p><button className="text-button" onClick={onBack}>Вернуться к курсам</button></main>
+  const currentSnapshot = course.data.snapshot
+  const snapshotLoadedOffline = course.data.loadedFromOffline
+  const offlineAssetIds = new Set(offlinePackage?.assets.map((asset) => asset.id) ?? [])
   const watermark = `${currentSnapshot.viewer.email} · ${currentSnapshot.viewer.session_id}`
-  const offlineAllowed = currentSnapshot.modules.some((module) => module.lessons.some((item) => item.content_units.some((unit) => unit.type !== 'text' && unit.is_downloadable === true)))
+  const offlineAllowed = currentSnapshot.modules.some((module) => module.lessons.some((item) => item.content_units.some((unit) => unit.type === 'text' || unit.is_downloadable === true)))
   const startDownload = () => {
     const controller = new AbortController()
     downloadController.current = controller
@@ -115,7 +134,7 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
       .finally(() => { setIsDownloading(false); downloadController.current = null })
   }
   const removeDownload = () => { void deleteOfflineCourse(courseId).then(() => { setOfflinePackage(undefined); setDownloadProgress(0); setDownloadSize(0) }) }
-  return <main className="learner-shell"><header className="workspace-header"><div><button className="text-button back-button" onClick={onBack}>← Все курсы</button><p className="eyebrow">Ваш учебный маршрут</p><h1>{currentSnapshot.title}</h1></div></header><div className="offline-manager">{offlineAllowed && !offlinePackage && !isDownloading && <><button className="primary-action" disabled={!online} onClick={startDownload}>Скачать курс</button>{typeof offlineInfo.data?.total_size === 'number' && <span>{formatBytes(offlineInfo.data.total_size)}</span>}</>}{isDownloading && <><p>Загрузка: {downloadProgress}% · {formatBytes(downloadSize)}</p><progress max="100" value={downloadProgress}>{downloadProgress}%</progress><button onClick={() => { downloadController.current?.abort() }}>Отменить загрузку</button></>}{offlinePackage && <><strong>Доступно офлайн</strong><span>{formatBytes(offlinePackage.totalSize)}</span>{offlinePackage.updateAvailable && <><span className="status">Доступно обновление</span><button disabled={!online || isDownloading} onClick={startDownload}>Обновить скачанный курс</button></>}<button onClick={removeDownload}>Удалить с устройства</button></>}{downloadError && <p className="form-error">{downloadError}</p>}</div><div className="learner-grid"><nav className="lesson-nav"><p className="eyebrow">Содержание</p>{currentSnapshot.modules.map((module) => <div key={module.id}><h3>{module.title}</h3>{module.lessons.map((item) => { const done = progress.data.find((row) => row.lesson_id === item.id)?.status === 'completed'; return <button className={item.id === lesson?.id ? 'lesson-link active' : 'lesson-link'} key={item.id} onClick={() => { setLessonId(item.id) }}><span>{done ? '✓ ' : ''}{item.title}</span></button> })}</div>)}</nav><article className="lesson-view"><p className="eyebrow">Урок</p><h2>{lesson?.title ?? 'Выберите урок'}</h2><p className="muted">{lesson?.description}</p>{lesson?.content_units.map((unit) => <div className="content-unit" key={unit.id}>{unit.type === 'text' ? <div className="markdown-content"><Markdown text={unit.text_markdown ?? ''} /></div> : <MediaUnit courseId={courseId} unit={unit} watermark={watermark} offlinePackage={offlinePackage} online={online} />}</div>)}{lesson && <button className="primary-action" disabled={!online} onClick={() => { save.mutate({ id: lesson.id, percent: 100 }) }}>Отметить урок завершённым ✓</button>}</article></div></main>
+  return <main className="learner-shell"><header className="workspace-header"><div><button className="text-button back-button" onClick={onBack}>← Все курсы</button><p className="eyebrow">Ваш учебный маршрут</p><h1>{currentSnapshot.title}</h1></div></header><div className="offline-manager">{!offlinePackageLoaded && <span>Проверяем загрузки…</span>}{offlinePackageLoaded && offlineAllowed && !offlinePackage && !isDownloading && <><button className="primary-action" disabled={!online} onClick={startDownload}>Скачать курс</button>{typeof offlineInfo.data?.total_size === 'number' && <span>{formatBytes(offlineInfo.data.total_size)}</span>}</>}{isDownloading && <><p>Загрузка: {downloadProgress}% · {formatBytes(downloadSize)}</p><progress max="100" value={downloadProgress}>{downloadProgress}%</progress><button onClick={() => { downloadController.current?.abort() }}>Отменить загрузку</button></>}{offlinePackage && <><strong>Доступно офлайн</strong><span>{formatBytes(offlinePackage.totalSize)}</span>{offlinePackage.updateAvailable && <><span className="status">Доступно обновление</span><button disabled={!online || isDownloading} onClick={startDownload}>Обновить скачанный курс</button></>}<button onClick={removeDownload}>Удалить с устройства</button></>}{downloadError && <p className="form-error">{downloadError}</p>}</div><div className="learner-grid"><nav className="lesson-nav"><p className="eyebrow">Содержание</p>{currentSnapshot.modules.map((module) => <div key={module.id}><h3>{module.title}</h3>{module.lessons.map((item) => { const done = progress.data.find((row) => row.lesson_id === item.id)?.status === 'completed'; return <button className={item.id === lesson?.id ? 'lesson-link active' : 'lesson-link'} key={item.id} onClick={() => { setLessonId(item.id) }}><span>{done ? '✓ ' : ''}{item.title}</span></button> })}</div>)}</nav><article className="lesson-view"><p className="eyebrow">Урок</p><h2>{lesson?.title ?? 'Выберите урок'}</h2><p className="muted">{lesson?.description}</p>{lesson?.content_units.map((unit) => <div className="content-unit" key={unit.id}>{unit.type === 'text' ? <div className="markdown-content"><Markdown text={unit.text_markdown ?? ''} /></div> : <MediaUnit courseId={courseId} unit={unit} watermark={watermark} offlinePackage={offlinePackage} offlineAssetAvailable={offlineAssetIds.has(unit.media_asset_id ?? '') || (Boolean(offlinePackage) && !online && unit.is_downloadable === true) || (snapshotLoadedOffline && unit.is_downloadable === true)} snapshotLoadedOffline={snapshotLoadedOffline} />}</div>)}{lesson && <button className="primary-action" disabled={!online} onClick={() => { save.mutate({ id: lesson.id, percent: 100 }) }}>Отметить урок завершённым ✓</button>}</article></div></main>
 }
 
 function CourseCover({ course }: { course: LearnerCourse }) {
@@ -132,6 +151,7 @@ function CourseCatalog({ courses, onSelect, onLogout }: { courses: LearnerCourse
 export function LearnerPage() {
   const [courseId, setCourseId] = useState<string | null>(null)
   const queryClient = useQueryClient()
+  const serviceWorkerReady = useServiceWorkerReady()
   const token = window.location.pathname.split('/').filter(Boolean).at(-1)
   const hasAccessToken = Boolean(token && token !== 'app')
   const existingCourses = useQuery({ queryKey: ['learner-courses'], networkMode: 'always', queryFn: async () => {
@@ -144,10 +164,11 @@ export function LearnerPage() {
     window.addEventListener('online', sync)
     return () => { window.removeEventListener('online', sync) }
   }, [])
-  if (!courseId && hasAccessToken && token) return <AccessLogin token={token} onLogin={setCourseId} />
-  if (courseId) return <CourseView courseId={courseId} onBack={() => { setCourseId(null) }} />
+  const serviceWorkerStatus = <p className={serviceWorkerReady ? 'form-success' : 'muted'}>{serviceWorkerReady ? 'Офлайн-функции готовы' : 'Для офлайн-просмотра перезапустите приложение'}</p>
+  if (!courseId && hasAccessToken && token) return <>{serviceWorkerStatus}<AccessLogin token={token} onLogin={setCourseId} /></>
+  if (courseId) return <>{serviceWorkerStatus}<CourseView courseId={courseId} onBack={() => { setCourseId(null) }} /></>
   if (existingCourses.isLoading) return <main className="loading-screen">Проверяем сессию...</main>
   if (existingCourses.error instanceof ApiError && existingCourses.error.code === 'SESSION_REVOKED') return <main className="state-screen"><h1>Сессия открыта на другом устройстве</h1><p>Доступ открыт на другом устройстве. Откройте ссылку там, где хотите продолжить обучение.</p></main>
   if (existingCourses.isError || !existingCourses.data?.length) return <main className="state-screen"><h1>Откройте ссылку из письма</h1><p>Для входа в кабинет ученика нужна персональная ссылка доступа.</p></main>
-  return <CourseCatalog courses={existingCourses.data} onSelect={setCourseId} onLogout={() => { logout.mutate() }} />
+  return <>{serviceWorkerStatus}<CourseCatalog courses={existingCourses.data} onSelect={setCourseId} onLogout={() => { logout.mutate() }} /></>
 }

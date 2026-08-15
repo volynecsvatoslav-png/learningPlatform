@@ -35,7 +35,6 @@ export type OfflineLicenseClaims = {
 export type OfflineLicense = {
   token: string
   claims: OfflineLicenseClaims
-  verification_key: JsonWebKey
   current_revision_id: string
   current_revision: number
   update_available: boolean
@@ -50,12 +49,13 @@ export type OfflinePackage = {
   shortDescription: string
   licenseToken: string
   licenseClaims: OfflineLicenseClaims
-  verificationKey: JsonWebKey
+  learnerId: string
+  sessionId: string
   snapshotIv: ArrayBuffer
   snapshotCiphertext: ArrayBuffer
   assets: OfflineAsset[]
   totalSize: number
-  storageKind: 'opfs' | 'idb'
+  storageKind: 'opfs' | 'idb' | 'mixed'
   status: 'ready'
   updateAvailable: boolean
   createdAt: number

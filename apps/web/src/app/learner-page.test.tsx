@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { LearnerPage } from './learner-page'
+import { LearnerPage, MediaUnit } from './learner-page'
+import type { OfflinePackage } from '../offline/types'
 
 function renderPage(path = '/app/') {
   window.history.pushState({}, '', path)
@@ -33,7 +34,15 @@ const snapshot = {
 }
 
 describe('LearnerPage', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(async () => {
+    vi.unstubAllGlobals()
+    await new Promise<void>((resolve) => {
+      const request = indexedDB.deleteDatabase('learning-platform-offline')
+      request.onsuccess = () => { resolve() }
+      request.onerror = () => { resolve() }
+      request.onblocked = () => { resolve() }
+    })
+  })
 
   it('shows all courses separately and opens only the selected course', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
@@ -161,5 +170,22 @@ describe('LearnerPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: /First course/i }))
 
     expect(await screen.findByRole('button', { name: 'Скачать курс' })).toBeInTheDocument()
+  })
+
+  it('falls back to offline media when the stream API fails while navigator.onLine is true', async () => {
+    const offlinePackage: OfflinePackage = {
+      courseId: 'course-1', packageId: 'package-1', revisionId: 'revision-1', revision: 1,
+      title: 'First course', shortDescription: '', licenseToken: 'fixture',
+      licenseClaims: { license_id: 'license', learner_id: 'learner-1', course_id: 'course-1', revision_id: 'revision-1', revision: 1, device_id: 'device', session_id: 'session', issued_at: 1, expires_at: 4102444800, iat: 1, exp: 4102444800 },
+      learnerId: 'learner-1', sessionId: 'session', snapshotIv: new ArrayBuffer(12), snapshotCiphertext: new ArrayBuffer(1),
+      assets: [{ id: 'asset-1', content_type: 'video/mp4', size_bytes: 6, sha256: '0'.repeat(64), chunk_size: 4, chunk_count: 2 }],
+      totalSize: 6, storageKind: 'idb', status: 'ready', updateAvailable: false, createdAt: Date.now(),
+    }
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ code: 'NETWORK_UNAVAILABLE' }, 503)))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(<QueryClientProvider client={queryClient}><MediaUnit courseId="course-1" unit={{ id: 'unit-video', type: 'video', title: 'Video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: true }} watermark="learner@example.com" offlinePackage={offlinePackage} offlineAssetAvailable snapshotLoadedOffline={false} /></QueryClientProvider>)
+
+    await waitFor(() => { expect(view.container.querySelector('video')).toHaveAttribute('src', '/offline-media/course-1/asset-1') })
   })
 })

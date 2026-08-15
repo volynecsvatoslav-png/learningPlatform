@@ -11,8 +11,12 @@ if (!rootElement) {
   throw new Error('Не найден корневой элемент приложения')
 }
 
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
-  void navigator.serviceWorker.register('/sw.js')
+const serviceWorkerEnabled = import.meta.env.PROD || import.meta.env.VITE_ENABLE_SERVICE_WORKER === 'true'
+
+if ('serviceWorker' in navigator && serviceWorkerEnabled) {
+  const workerURL = new URL('/sw.js', window.location.origin)
+  workerURL.searchParams.set('licenseKey', import.meta.env.VITE_OFFLINE_LICENSE_PUBLIC_JWK)
+  void navigator.serviceWorker.register(`${workerURL.pathname}${workerURL.search}`)
 }
 
 createRoot(rootElement).render(

@@ -23,7 +23,8 @@ function ErrorMessage({ error }: { error: Error | null }) {
     if (Array.isArray(value)) return result.concat(value.filter((item): item is string => typeof item === 'string'))
     return result
   }, [])
-  const message = error instanceof ApiError && error.code === 'AUTH_RATE_LIMITED' ? 'Слишком много попыток. Повторите позже.' : messages[0] ?? (error instanceof ApiError ? error.message : 'Не удалось выполнить запрос.')
+  const detail = typeof body.detail === 'string' ? body.detail : undefined
+  const message = error instanceof ApiError && error.code === 'AUTH_RATE_LIMITED' ? 'Слишком много попыток. Повторите позже.' : detail ?? messages[0] ?? (error instanceof ApiError ? error.message : 'Не удалось выполнить запрос.')
   return <p className="form-error">{message}</p>
 }
 
@@ -124,7 +125,7 @@ export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }
       <button disabled={!canCreate} onClick={() => {
         const content = type === 'text' ? { type, text_markdown: text } : { type, media_asset_id: assetId, is_downloadable: offlineAccess }
         act({ entity: 'content', action: 'create', parent_id: lessonId, title, ...content })
-        setTitle(''); setText(''); setAssetId('')
+        setTitle(''); setText(''); setAssetId(''); setOfflineAccess(false)
       }}>Добавить блок</button>
     </div>
   )

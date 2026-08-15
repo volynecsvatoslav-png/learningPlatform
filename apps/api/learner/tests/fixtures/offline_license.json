@@ -1,0 +1,18 @@
+{
+  "publicJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "l242GNMQAQSa-GSVtUflOeS6m1kzEOi9oRA88cUx5v8",
+    "y": "Rw_iSGOS8Djf5dm5zVJoBwIskMOikApH8pPOp6vh0eo"
+  },
+  "claims": {
+    "learner_id": "learner-1",
+    "course_id": "course-1",
+    "session_id": "session-1"
+  },
+  "tokens": {
+    "revision-1": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJsaWNlbnNlX2lkIjoiZml4dHVyZSIsImxlYXJuZXJfaWQiOiJsZWFybmVyLTEiLCJjb3Vyc2VfaWQiOiJjb3Vyc2UtMSIsImRldmljZV9pZCI6ImRldmljZS0xIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImlzc3VlZF9hdCI6MTcwMDAwMDAwMCwiaWF0IjoxNzAwMDAwMDAwLCJyZXZpc2lvbl9pZCI6InJldmlzaW9uLTEiLCJyZXZpc2lvbiI6MSwiZXhwaXJlc19hdCI6NDEwMjQ0NDgwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.WllLW0jbjrr5tSjO21e-xCWFoRsyIbWmyB5q4hKnHVxWOrBYwmcY_kzZYlY_e0jkzSMtXLphfwYEm5a9f5A8dQ",
+    "revision-2": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJsaWNlbnNlX2lkIjoiZml4dHVyZSIsImxlYXJuZXJfaWQiOiJsZWFybmVyLTEiLCJjb3Vyc2VfaWQiOiJjb3Vyc2UtMSIsImRldmljZV9pZCI6ImRldmljZS0xIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImlzc3VlZF9hdCI6MTcwMDAwMDAwMCwiaWF0IjoxNzAwMDAwMDAwLCJyZXZpc2lvbl9pZCI6InJldmlzaW9uLTIiLCJyZXZpc2lvbiI6MiwiZXhwaXJlc19hdCI6NDEwMjQ0NDgwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.CpJnARqyJBrq_6bgJbU96NgqqBiPickM4oO6xP0iFVgfOssf3APtqKSGSN_nneROvRM_mk1j4ifKHlkFnUHC2w",
+    "expired": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJsaWNlbnNlX2lkIjoiZml4dHVyZSIsImxlYXJuZXJfaWQiOiJsZWFybmVyLTEiLCJjb3Vyc2VfaWQiOiJjb3Vyc2UtMSIsImRldmljZV9pZCI6ImRldmljZS0xIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImlzc3VlZF9hdCI6MTcwMDAwMDAwMCwiaWF0IjoxNzAwMDAwMDAwLCJyZXZpc2lvbl9pZCI6InJldmlzaW9uLTEiLCJyZXZpc2lvbiI6MSwiZXhwaXJlc19hdCI6MSwiZXhwIjoxfQ.9sAuws6fmnoz9MdfBK7jiBmeQP9PYiMPkY1NwJtBjLjn2yOOkVdlDJDsnA3yn3EcSMzT-xKUCOkYl9XV4izLEg"
+  }
+}

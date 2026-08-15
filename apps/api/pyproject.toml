@@ -10,11 +10,13 @@ dependencies = [
     "argon2-cffi==25.1.0",
     "boto3==1.43.69",
     "celery==5.5.3",
+    "cryptography==45.0.6",
     "Django==5.2.17",
     "djangorestframework==3.18.0",
     "filetype==1.2.0",
     "gunicorn==23.0.0",
     "psycopg[binary]==3.2.10",
+    "PyJWT==2.10.1",
     "redis==6.4.0",
     "whitenoise==6.9.0",
 ]

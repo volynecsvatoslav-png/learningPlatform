@@ -2,6 +2,8 @@ const SHELL_CACHE = 'learning-platform-shell-v2'
 const DB_NAME = 'learning-platform-offline'
 const DB_VERSION = 1
 const encoder = new TextEncoder()
+const configuredLicenseKey = new URL(self.location.href).searchParams.get('licenseKey')
+const OFFLINE_LICENSE_PUBLIC_JWK = configuredLicenseKey ? JSON.parse(configuredLicenseKey) : null
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.add('/app/')).then(() => self.skipWaiting()))
@@ -54,7 +56,10 @@ function decodeBase64Url(value) {
 async function verifyLicense(offlinePackage) {
   const parts = offlinePackage.licenseToken.split('.')
   if (parts.length !== 3) throw new Error('OFFLINE_LICENSE_INVALID')
-  const key = await crypto.subtle.importKey('jwk', offlinePackage.verificationKey, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+  if (!OFFLINE_LICENSE_PUBLIC_JWK) throw new Error('OFFLINE_LICENSE_INVALID')
+  const header = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[0])))
+  if (header.alg !== 'ES256') throw new Error('OFFLINE_LICENSE_INVALID')
+  const key = await crypto.subtle.importKey('jwk', OFFLINE_LICENSE_PUBLIC_JWK, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
   const valid = await crypto.subtle.verify(
     { name: 'ECDSA', hash: 'SHA-256' },
     key,
@@ -63,8 +68,10 @@ async function verifyLicense(offlinePackage) {
   )
   if (!valid) throw new Error('OFFLINE_LICENSE_INVALID')
   const claims = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[1])))
+  if (!Number.isSafeInteger(claims.iat) || claims.iat * 1000 > Date.now() + 5 * 60 * 1000) throw new Error('OFFLINE_LICENSE_INVALID')
   if (claims.expires_at * 1000 <= Date.now()) throw new Error('OFFLINE_LICENSE_EXPIRED')
-  if (claims.course_id !== offlinePackage.courseId || claims.revision_id !== offlinePackage.revisionId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (claims.exp !== claims.expires_at || claims.issued_at !== claims.iat) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (claims.course_id !== offlinePackage.courseId || claims.revision_id !== offlinePackage.revisionId || claims.learner_id !== offlinePackage.learnerId || claims.session_id !== offlinePackage.sessionId) throw new Error('OFFLINE_LICENSE_INVALID')
   return claims
 }
 

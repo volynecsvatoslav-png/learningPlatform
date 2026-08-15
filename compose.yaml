@@ -5,6 +5,7 @@ x-api: &api
     context: ./apps/api
   environment:
     APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8000}
+    PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:5173}
     DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-development-secret-change-before-deployment}
     DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
     DJANGO_SECURE_COOKIES: ${DJANGO_SECURE_COOKIES:-false}
@@ -21,7 +22,7 @@ x-api: &api
     S3_USE_SSL: ${S3_USE_SSL:-false}
     S3_CHECKSUM_POLICY_SUPPORTED: ${S3_CHECKSUM_POLICY_SUPPORTED:-false}
     MEDIA_TRANSFER_MODE: ${MEDIA_TRANSFER_MODE:-proxy}
-    OFFLINE_LICENSE_SIGNING_PRIVATE_KEY: ${OFFLINE_LICENSE_SIGNING_PRIVATE_KEY:-local-offline-license-key-change-before-deployment}
+    OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64: ${OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64:-LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3RpRURSd2ZQMEtqN2dCVUkKYmRUSTMybS9XckVrWGEraXFERDhrbWQ5bm55aFJBTkNBQVNYYmpZWTB4QUJCSnI0WkpXMVIrVTU1THFiV1RNUQo2TDJoRUR6eHhUSG0vMGNQNGtoamt2QTQzK1hadWMxU2FBY0NMSkREb3BBS1IvS1R6cWVyNGRIcQotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==}
     OFFLINE_LICENSE_TTL_HOURS: ${OFFLINE_LICENSE_TTL_HOURS:-168}
     DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,api}
     SMTP_HOST: mailpit
@@ -40,8 +41,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-learning}
       POSTGRES_USER: ${POSTGRES_USER:-learning}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-learning}
-    ports:
-      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -70,8 +69,8 @@ services:
       MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:-local-kms-key:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
       MINIO_API_CORS_ALLOW_ORIGIN: ${MEDIA_CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -101,8 +100,8 @@ services:
   mailpit:
     image: axllent/mailpit:v1.27
     ports:
-      - "1025:1025"
-      - "8025:8025"
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
     healthcheck:
       test: ["CMD", "/mailpit", "readyz"]
       interval: 5s
@@ -112,7 +111,7 @@ services:
   api:
     <<: *api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test:
         [
@@ -139,7 +138,7 @@ services:
       S3_USE_SSL: ${S3_USE_SSL:-false}
       S3_CHECKSUM_POLICY_SUPPORTED: ${S3_CHECKSUM_POLICY_SUPPORTED:-false}
       MEDIA_TRANSFER_MODE: ${MEDIA_TRANSFER_MODE:-proxy}
-      OFFLINE_LICENSE_SIGNING_PRIVATE_KEY: ${OFFLINE_LICENSE_SIGNING_PRIVATE_KEY:-local-offline-license-key-change-before-deployment}
+      OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64: ${OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64:-LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JR0hBZ0VBTUJNR0J5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEJHMHdhd0lCQVFRZ3RpRURSd2ZQMEtqN2dCVUkKYmRUSTMybS9XckVrWGEraXFERDhrbWQ5bm55aFJBTkNBQVNYYmpZWTB4QUJCSnI0WkpXMVIrVTU1THFiV1RNUQo2TDJoRUR6eHhUSG0vMGNQNGtoamt2QTQzK1hadWMxU2FBY0NMSkREb3BBS1IvS1R6cWVyNGRIcQotLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tCg==}
       OFFLINE_LICENSE_TTL_HOURS: ${OFFLINE_LICENSE_TTL_HOURS:-168}
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
@@ -157,8 +156,10 @@ services:
       context: ./apps/web
     environment:
       VITE_ALLOWED_HOSTS: ${VITE_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      VITE_ENABLE_SERVICE_WORKER: ${VITE_ENABLE_SERVICE_WORKER:-true}
+      VITE_OFFLINE_LICENSE_PUBLIC_JWK: '${VITE_OFFLINE_LICENSE_PUBLIC_JWK:-{"kty":"EC","x":"l242GNMQAQSa-GSVtUflOeS6m1kzEOi9oRA88cUx5v8","y":"Rw_iSGOS8Djf5dm5zVJoBwIskMOikApH8pPOp6vh0eo","crv":"P-256"}}'
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     depends_on:
       api:
         condition: service_healthy
