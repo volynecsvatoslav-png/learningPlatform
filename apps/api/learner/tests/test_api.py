@@ -53,7 +53,12 @@ def test_access_token_is_hashed_and_exchange_creates_server_session(client: Clie
     assert session.learner == learner
     assert session.revoked_at is None
     assert client.get("/api/v1/learner/courses").status_code == 200
-    assert client.get(f"/api/v1/learner/courses/{course.id}").status_code == 200
+    course_response = client.get(f"/api/v1/learner/courses/{course.id}")
+    assert course_response.status_code == 200
+    assert course_response.json()["viewer"] == {
+        "email": learner.email,
+        "session_id": str(session.id)[:8],
+    }
 
 
 def test_second_device_revokes_first_and_old_session_gets_code(client: Client) -> None:
@@ -215,17 +220,138 @@ def test_learner_proxy_content_is_enrollment_scoped_and_supports_range(client: C
         lesson=lesson, type=ContentUnit.Type.VIDEO, position=1, media_asset=asset
     )
     publish_course(course)
+    content_url = f"/api/v1/learner/courses/{course.id}/media/{asset.id}/content"
+    stream_url = f"/api/v1/learner/courses/{course.id}/media/{asset.id}/stream-url"
+    assert client.get(content_url).status_code == 401
     session_login(client, token)
+    stream_response = client.get(stream_url)
+    assert stream_response.status_code == 200
+    assert stream_response.json() == {"url": content_url}
+    assert "private/learner-video" not in stream_response.content.decode()
     storage = Mock()
     storage.head.return_value = {"ContentLength": 10}
     storage.read_range.return_value = iter([b"234"])
     with patch("media_assets.views.get_storage", return_value=storage):
         response = client.get(
-            f"/api/v1/learner/courses/{course.id}/media/{asset.id}/content",
+            content_url,
             HTTP_RANGE="bytes=2-4",
         )
     assert response.status_code == 206
     assert response["Content-Range"] == "bytes 2-4/10"
+    assert response["Content-Disposition"] == "inline"
     assert response["Cache-Control"] == "private, no-store"
     assert response["Accept-Ranges"] == "bytes"
     assert b"private/learner-video" not in b"".join(response.streaming_content)
+
+    enrollment = Enrollment.objects.get(course=course, learner=learner)
+    enrollment.status = Enrollment.Status.REVOKED
+    enrollment.revoked_at = timezone.now()
+    enrollment.save(update_fields=("status", "revoked_at"))
+    assert client.get(content_url).status_code == 404
+
+
+def test_offline_manifest_license_revision_and_revocation(client: Client) -> None:
+    learner, course, lesson, token = make_access()
+    asset = MediaAsset.objects.create(
+        vendor=course.vendor,
+        kind=MediaAsset.Kind.VIDEO,
+        status=MediaAsset.Status.READY,
+        bucket="private-bucket",
+        object_key="private/offline-video",
+        original_name="offline.mp4",
+        content_type="video/mp4",
+        size_bytes=10,
+        sha256="1" * 64,
+        created_by=learner,
+    )
+    lesson.content_units.all().delete()
+    unit = ContentUnit.objects.create(
+        lesson=lesson,
+        type=ContentUnit.Type.VIDEO,
+        position=1,
+        media_asset=asset,
+        is_downloadable=True,
+    )
+    allowed_revision = publish_course(course)
+    manifest_url = f"/api/v1/learner/courses/{course.id}/offline-manifest"
+    license_url = f"/api/v1/learner/courses/{course.id}/offline-license"
+    media_url = (
+        f"/api/v1/learner/courses/{course.id}/offline-media/{allowed_revision.id}/{asset.id}"
+    )
+
+    assert client.get(manifest_url).status_code == 401
+    session_login(client, token)
+    manifest = client.get(manifest_url)
+    assert manifest.status_code == 200
+    assert manifest["Cache-Control"] == "private, no-store"
+    assert manifest.json()["revision_id"] == str(allowed_revision.id)
+    assert manifest.json()["total_size"] == 10
+    assert manifest.json()["assets"] == [
+        {
+            "id": str(asset.id),
+            "content_type": "video/mp4",
+            "size_bytes": 10,
+            "sha256": "1" * 64,
+            "chunk_size": 4 * 1024 * 1024,
+            "chunk_count": 1,
+        }
+    ]
+    assert "object_key" not in manifest.content.decode()
+    assert "private/offline-video" not in manifest.content.decode()
+
+    license_response = client.post(
+        license_url,
+        data={"revision_id": str(allowed_revision.id)},
+        content_type="application/json",
+    )
+    assert license_response.status_code == 200
+    assert license_response["Cache-Control"] == "private, no-store"
+    license_data = license_response.json()
+    assert license_data["claims"]["learner_id"] == str(learner.id)
+    assert license_data["claims"]["course_id"] == str(course.id)
+    assert license_data["claims"]["revision_id"] == str(allowed_revision.id)
+    assert (
+        license_data["claims"]["expires_at"] - license_data["claims"]["issued_at"]
+        == 7 * 24 * 60 * 60
+    )
+    assert license_data["token"].count(".") == 2
+    assert license_data["verification_key"]["crv"] == "P-256"
+    assert license_data["verification_key"]["ext"] is True
+
+    storage = Mock()
+    storage.head.return_value = {"ContentLength": 10}
+    storage.read_range.return_value = iter([b"0123"])
+    with patch("media_assets.views.get_storage", return_value=storage):
+        media_response = client.get(media_url, HTTP_RANGE="bytes=0-3")
+    assert media_response.status_code == 206
+    assert media_response["Content-Disposition"] == "inline"
+
+    unit.is_downloadable = False
+    unit.save(update_fields=("is_downloadable",))
+    forbidden_revision = publish_course(course)
+    update_response = client.post(
+        license_url,
+        data={"revision_id": str(allowed_revision.id)},
+        content_type="application/json",
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["current_revision_id"] == str(forbidden_revision.id)
+    assert update_response.json()["update_available"] is True
+    assert client.get(manifest_url).json()["assets"] == []
+    forbidden_url = (
+        f"/api/v1/learner/courses/{course.id}/offline-media/{forbidden_revision.id}/{asset.id}"
+    )
+    assert client.get(forbidden_url).status_code == 404
+
+    enrollment = Enrollment.objects.get(course=course, learner=learner)
+    enrollment.status = Enrollment.Status.REVOKED
+    enrollment.revoked_at = timezone.now()
+    enrollment.save(update_fields=("status", "revoked_at"))
+    assert (
+        client.post(
+            license_url,
+            data={"revision_id": str(allowed_revision.id)},
+            content_type="application/json",
+        ).status_code
+        == 404
+    )

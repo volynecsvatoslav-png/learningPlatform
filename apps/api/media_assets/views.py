@@ -185,6 +185,9 @@ def serve_asset_content(request: Request, asset: MediaAsset) -> StreamingHttpRes
     if requested and selected is None:
         response = StreamingHttpResponse(status=416)
         response["Content-Range"] = f"bytes */{size}"
+        response["Content-Disposition"] = "inline"
+        response["Accept-Ranges"] = "bytes"
+        response["Cache-Control"] = "private, no-store"
         return response
     start, end = selected or (0, size - 1)
     response = StreamingHttpResponse(
@@ -193,6 +196,7 @@ def serve_asset_content(request: Request, asset: MediaAsset) -> StreamingHttpRes
         content_type=asset.content_type,
     )
     response["Content-Length"] = str(end - start + 1)
+    response["Content-Disposition"] = "inline"
     response["Accept-Ranges"] = "bytes"
     response["Cache-Control"] = "private, no-store"
     if selected:

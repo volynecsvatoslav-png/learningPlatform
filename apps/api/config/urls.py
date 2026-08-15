@@ -11,6 +11,9 @@ from learner.views import (
     LearnerCsrfView,
     LearnerLogoutView,
     LearnerMediaContentView,
+    LearnerOfflineLicenseView,
+    LearnerOfflineManifestView,
+    LearnerOfflineMediaContentView,
     LearnerProgressView,
     LearnerSessionView,
     LearnerStreamURLView,
@@ -35,6 +38,7 @@ from vendor_api.views import (
     VendorCourseListView,
     VendorCoursePreviewView,
     VendorCoursePublishView,
+    VendorCourseRestoreView,
     VendorCourseStructureView,
     VendorCsrfView,
     VendorLogoutView,
@@ -103,6 +107,11 @@ urlpatterns = [
         name="vendor-course-archive",
     ),
     path(
+        "api/v1/vendor/courses/<uuid:course_id>/restore",
+        VendorCourseRestoreView.as_view(),
+        name="vendor-course-restore",
+    ),
+    path(
         "api/v1/vendor/courses/<uuid:course_id>/preview",
         VendorCoursePreviewView.as_view(),
         name="vendor-course-preview",
@@ -164,6 +173,21 @@ urlpatterns = [
         "api/v1/learner/courses/<uuid:course_id>",
         LearnerCourseDetailView.as_view(),
         name="learner-course",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/offline-manifest",
+        LearnerOfflineManifestView.as_view(),
+        name="learner-offline-manifest",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/offline-license",
+        LearnerOfflineLicenseView.as_view(),
+        name="learner-offline-license",
+    ),
+    path(
+        "api/v1/learner/courses/<uuid:course_id>/offline-media/<uuid:revision_id>/<uuid:asset_id>",
+        LearnerOfflineMediaContentView.as_view(),
+        name="learner-offline-media-content",
     ),
     path(
         "api/v1/learner/courses/<uuid:course_id>/progress",

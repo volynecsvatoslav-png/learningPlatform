@@ -892,6 +892,21 @@ button.danger-button {
   margin: 2rem 0;
 }
 
+.offline-manager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 1rem;
+  border: 1px solid #b9beb6;
+  background: #fffdf7;
+}
+
+.offline-manager progress {
+  width: min(22rem, 100%);
+}
+
 .markdown-content {
   color: #394139;
   line-height: 1.75;
@@ -910,6 +925,32 @@ button.danger-button {
   max-width: 100%;
   height: auto;
 }
+
+.video-frame {
+  position: relative;
+  overflow: hidden;
+  width: fit-content;
+  max-width: 100%;
+  background: #111;
+}
+
+.video-watermark {
+  position: absolute;
+  z-index: 1;
+  padding: 0.35rem 0.55rem;
+  color: rgb(255 255 255 / 78%);
+  background: rgb(0 0 0 / 35%);
+  font-size: clamp(0.65rem, 1.5vw, 0.85rem);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  transition: inset 500ms ease;
+}
+
+.watermark-position-0 { inset: 8% auto auto 6%; }
+.watermark-position-1 { inset: 8% 6% auto auto; }
+.watermark-position-2 { inset: auto 6% 10% auto; }
+.watermark-position-3 { inset: auto auto 10% 6%; }
 
 .lesson-view audio {
   width: min(100%, 32rem);

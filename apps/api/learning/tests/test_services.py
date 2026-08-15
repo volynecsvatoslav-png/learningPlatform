@@ -58,6 +58,18 @@ def make_published_tree(course: Course, asset: MediaAsset | None = None) -> tupl
     return module, lesson
 
 
+def test_content_unit_disables_offline_access_by_default() -> None:
+    _, course, _ = make_course()
+    module = create_module(course, title="Module")
+    lesson = create_lesson(module, title="Lesson")
+
+    unit = create_content_unit(
+        lesson, type=ContentUnit.Type.TEXT, text_markdown="# Offline disabled"
+    )
+
+    assert unit.is_downloadable is False
+
+
 def test_publish_creates_immutable_canonical_snapshot_and_preserves_draft() -> None:
     vendor, course, user = make_course()
     asset = make_asset(vendor, user)

@@ -11,6 +11,7 @@ from django.utils.http import urlsafe_base64_encode
 from accounts.models import User
 from learner.models import AccessLink, Enrollment, hash_access_token
 from learning.models import ContentUnit, Course, Lesson, Module
+from learning.services import publish_course
 from media_assets.models import MediaAsset
 from vendors.models import Vendor, VendorMember
 
@@ -192,6 +193,33 @@ def test_vendor_course_and_structure_are_tenant_scoped(client: Client) -> None:
     response = client.post(f"/api/v1/vendor/courses/{created['id']}/publish")
     assert response.status_code == 200
     assert response.json()["revision"] == 1
+
+
+def test_archived_course_restores_to_its_last_publication_state(client: Client) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    owner = member("owner@example.com", vendor, VendorMember.Role.OWNER)
+    draft = course(vendor, "draft")
+    published = course(vendor, "published")
+    module = Module.objects.create(course=published, title="Module", position=1)
+    lesson = Lesson.objects.create(module=module, title="Lesson", position=1, is_published=True)
+    ContentUnit.objects.create(
+        lesson=lesson,
+        type=ContentUnit.Type.TEXT,
+        position=1,
+        text_markdown="# Published",
+    )
+    publish_course(published, created_by=owner)
+    draft.archive()
+    published.archive()
+    client.force_login(owner)
+
+    draft_response = client.post(f"/api/v1/vendor/courses/{draft.id}/restore")
+    published_response = client.post(f"/api/v1/vendor/courses/{published.id}/restore")
+
+    assert draft_response.status_code == 200
+    assert draft_response.json()["status"] == Course.Status.DRAFT
+    assert published_response.status_code == 200
+    assert published_response.json()["status"] == Course.Status.PUBLISHED
 
 
 def test_course_create_and_patch_reject_foreign_cover_asset(client: Client) -> None:

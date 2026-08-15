@@ -71,17 +71,18 @@ function ContentEditor({ unit, lessonId, position, total, readyMedia, act }: {
   const [title, setTitle] = useState(unit.title)
   const [text, setText] = useState(unit.text_markdown ?? '')
   const [assetId, setAssetId] = useState(unit.media_asset_id ?? '')
+  const [offlineAccess, setOfflineAccess] = useState(Boolean(unit.is_downloadable))
   const compatibleMedia = readyMedia.filter((asset) => asset.kind === unit.type)
   const payload = unit.type === 'text'
     ? { type: unit.type, title, text_markdown: text }
-    : { type: unit.type, title, media_asset_id: assetId }
+    : { type: unit.type, title, media_asset_id: assetId, is_downloadable: offlineAccess }
   return (
     <div className="content-editor">
       <div className="editor-fields">
         <label>Название<input value={title} onChange={(event) => { setTitle(event.target.value) }} /></label>
         {unit.type === 'text'
           ? <label>Markdown<textarea value={text} onChange={(event) => { setText(event.target.value) }} /></label>
-          : <label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }} required><option value="">Выберите файл</option>{compatibleMedia.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label>}
+          : <><label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }} required><option value="">Выберите файл</option>{compatibleMedia.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label><label><input type="checkbox" checked={offlineAccess} onChange={(event) => { setOfflineAccess(event.target.checked) }} /> Разрешить офлайн-просмотр</label></>}
       </div>
       <div className="item-actions">
         <span className="status">{unit.type} · {position}/{total}</span>
@@ -100,6 +101,7 @@ export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }
   const [text, setText] = useState('')
   const [assetId, setAssetId] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [offlineAccess, setOfflineAccess] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadedId, setUploadedId] = useState<string | null>(null)
   const upload = useMutation({ mutationFn: () => transferMode ? vendorApi.uploadMedia(transferMode, vendorId, file as File, type as MediaAsset['kind'], setUploadProgress) : Promise.reject(new ApiError(503, 'MEDIA_CONFIG_UNAVAILABLE', {}, 'Режим передачи медиа ещё не определён.')), onSuccess: (asset) => { setUploadedId(asset.id) } })
@@ -113,14 +115,14 @@ export function NewContent({ lessonId, readyMedia, act, vendorId, transferMode }
     <div className="new-content-form">
       <h5>Новый контент-блок</h5>
       <div className="editor-fields compact-fields">
-        <label>Тип<select value={type} onChange={(event) => { setType(event.target.value as ContentUnit['type']); setAssetId('') }}><option value="text">Текст</option><option value="image">Изображение</option><option value="audio">Аудио</option><option value="video">Видео</option></select></label>
+        <label>Тип<select value={type} onChange={(event) => { setType(event.target.value as ContentUnit['type']); setAssetId(''); setOfflineAccess(false) }}><option value="text">Текст</option><option value="image">Изображение</option><option value="audio">Аудио</option><option value="video">Видео</option></select></label>
         <label>Название<input value={title} onChange={(event) => { setTitle(event.target.value) }} /></label>
         {type === 'text'
           ? <label>Markdown<textarea value={text} onChange={(event) => { setText(event.target.value) }} /></label>
-          : <><label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }}><option value="">Выберите файл</option>{mediaOptions.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label><label>Новый файл<input type="file" accept={`${type}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /></label><button type="button" disabled={!file || !transferMode || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить новый файл</button>{upload.isPending && <progress max="100" value={uploadProgress}>{uploadProgress}%</progress>}{uploadStatus.data && <small>{uploadStatus.data.status === 'ready' ? 'Файл готов и выбран.' : `Проверка: ${uploadStatus.data.status}`}</small>}{upload.error && <><ErrorMessage error={upload.error} /><button type="button" onClick={() => { upload.reset(); upload.mutate() }}>Повторить загрузку</button></>}</>}
+          : <><label>Готовое медиа<select value={assetId} onChange={(event) => { setAssetId(event.target.value) }}><option value="">Выберите файл</option>{mediaOptions.map((asset) => <option key={asset.id} value={asset.id}>{asset.original_name}</option>)}</select></label><label><input type="checkbox" checked={offlineAccess} onChange={(event) => { setOfflineAccess(event.target.checked) }} /> Разрешить офлайн-просмотр</label><label>Новый файл<input type="file" accept={`${type}/*`} onChange={(event) => { setFile(event.target.files?.[0] ?? null) }} /></label><button type="button" disabled={!file || !transferMode || upload.isPending} onClick={() => { upload.mutate() }}>Загрузить новый файл</button>{upload.isPending && <progress max="100" value={uploadProgress}>{uploadProgress}%</progress>}{uploadStatus.data && <small>{uploadStatus.data.status === 'ready' ? 'Файл готов и выбран.' : `Проверка: ${uploadStatus.data.status}`}</small>}{upload.error && <><ErrorMessage error={upload.error} /><button type="button" onClick={() => { upload.reset(); upload.mutate() }}>Повторить загрузку</button></>}</>}
       </div>
       <button disabled={!canCreate} onClick={() => {
-        const content = type === 'text' ? { type, text_markdown: text } : { type, media_asset_id: assetId }
+        const content = type === 'text' ? { type, text_markdown: text } : { type, media_asset_id: assetId, is_downloadable: offlineAccess }
         act({ entity: 'content', action: 'create', parent_id: lessonId, title, ...content })
         setTitle(''); setText(''); setAssetId('')
       }}>Добавить блок</button>
@@ -248,6 +250,7 @@ function CourseEditor({ vendor, course, onClose, transferMode }: { vendor: Vendo
   const action = useMutation({ mutationFn: (data: StructureAction) => vendorApi.structureAction(id ?? '', data), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['structure', id] }) } })
   const publish = useMutation({ mutationFn: () => vendorApi.publish(id ?? ''), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['courses', vendor.id] }) } })
   const archive = useMutation({ mutationFn: () => vendorApi.archiveCourse(id ?? ''), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['courses', vendor.id] }); onClose() } })
+  const restore = useMutation({ mutationFn: () => vendorApi.restoreCourse(id ?? ''), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['courses', vendor.id] }); onClose() } })
   const preview = useMutation({ mutationFn: () => vendorApi.preview(id ?? '') })
   return (
     <main className="workspace editor-workspace">
@@ -260,10 +263,10 @@ function CourseEditor({ vendor, course, onClose, transferMode }: { vendor: Vendo
         </form>
          {id && <>
            <div className="subsection"><div className="panel-heading"><div><p className="eyebrow">Структура</p><h3>Модули и уроки</h3></div><span className="status">{structure.data?.modules.length ?? 0} модулей</span></div><div className="inline-form"><input aria-label="Название нового модуля" placeholder="Новый модуль" value={moduleTitle} onChange={(event) => { setModuleTitle(event.target.value) }} /><button disabled={!moduleTitle.trim()} onClick={() => { action.mutate({ entity: 'module', action: 'create', title: moduleTitle }); setModuleTitle('') }}>Добавить модуль</button></div>{structure.isLoading && <p className="muted">Загрузка структуры...</p>}{structure.data?.modules.map((module, index) => <ModuleEditor key={module.id} module={module} position={index + 1} total={structure.data.modules.length} readyMedia={readyMedia} act={(data) => { action.mutate(data) }} vendorId={vendor.id} transferMode={transferMode} />)}</div>
-          <div className="item-actions course-actions"><button className="primary-action" onClick={() => { publish.mutate() }}>Опубликовать ревизию →</button><button onClick={() => { preview.mutate() }}>Показать опубликованную версию</button><button className="danger-button" onClick={() => { archive.mutate() }}>Архивировать</button></div>
+           <div className="item-actions course-actions">{course.status !== 'archived' && <button className="primary-action" onClick={() => { publish.mutate() }}>Опубликовать ревизию →</button>}<button onClick={() => { preview.mutate() }}>Показать опубликованную версию</button>{course.status === 'archived' ? <button className="primary-action" onClick={() => { restore.mutate() }}>Восстановить</button> : <button className="danger-button" onClick={() => { if (window.confirm('Архивировать курс? Он перестанет быть доступен ученикам.')) archive.mutate() }}>Архивировать</button>}</div>
           {preview.data && <PublishedPreview snapshot={preview.data} media={readyMedia} />}
         </>}
-        <ErrorMessage error={save.error ?? action.error ?? publish.error ?? archive.error ?? preview.error} />
+        <ErrorMessage error={save.error ?? action.error ?? publish.error ?? archive.error ?? restore.error ?? preview.error} />
       </section>
     </main>
   )

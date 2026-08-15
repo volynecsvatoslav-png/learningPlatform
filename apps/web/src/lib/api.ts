@@ -1,3 +1,5 @@
+import type { OfflineLicense, OfflineManifest } from '../offline/types'
+
 export type Vendor = { id: string; name: string; role: 'owner' | 'editor' }
 export type Course = {
   id: string
@@ -59,7 +61,9 @@ export type LearnerCourse = {
 export type LearnerSnapshot = {
   id?: string
   title: string
+  short_description?: string
   description_markdown: string
+  viewer: { email: string; session_id: string }
   modules: Array<{ id: string; title: string; description: string; lessons: Array<{ id: string; title: string; description: string; content_units: ContentUnit[] }> }>
 }
 export type LearnerProgress = {
@@ -125,6 +129,7 @@ export const vendorApi = {
   createCourse: (vendorId: string, data: Pick<Course, 'title' | 'slug' | 'short_description' | 'description_markdown'>) => request<Course>(`/api/v1/vendor/courses?vendor_id=${vendorId}`, { method: 'POST', body: JSON.stringify(data) }),
   updateCourse: (id: string, data: Partial<Course>) => request<Course>(`/api/v1/vendor/courses/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   archiveCourse: (id: string) => request<Course>(`/api/v1/vendor/courses/${id}/archive`, { method: 'POST' }),
+  restoreCourse: (id: string) => request<Course>(`/api/v1/vendor/courses/${id}/restore`, { method: 'POST' }),
   preview: (id: string) => request<LearnerSnapshot>(`/api/v1/vendor/courses/${id}/preview`),
   structure: (id: string) => request<{ modules: Array<Module & { lessons: Array<Lesson & { content_units: ContentUnit[] }> }> }>(`/api/v1/vendor/courses/${id}/structure`),
   structureAction: (id: string, data: Record<string, unknown>) => request<Module | Lesson | ContentUnit>(`/api/v1/vendor/courses/${id}/structure`, { method: 'POST', body: JSON.stringify(data) }),
@@ -201,6 +206,8 @@ export const learnerApi = {
   logout: () => request<{ ok: true }>('/api/v1/learner/logout', { method: 'POST' }),
   courses: () => request<LearnerCourse[]>('/api/v1/learner/courses'),
   course: (id: string) => request<LearnerSnapshot>(`/api/v1/learner/courses/${id}`),
+  offlineManifest: (id: string) => request<OfflineManifest>(`/api/v1/learner/courses/${id}/offline-manifest`),
+  offlineLicense: (id: string, revisionId: string) => request<OfflineLicense>(`/api/v1/learner/courses/${id}/offline-license`, { method: 'POST', body: JSON.stringify({ revision_id: revisionId }) }),
   progress: (courseId: string) => request<LearnerProgress[]>(`/api/v1/learner/courses/${courseId}/progress`),
   saveProgress: (courseId: string, lessonId: string, percent: number) => request(`/api/v1/learner/courses/${courseId}/progress/${lessonId}`, { method: 'POST', body: JSON.stringify({ percent, status: percent === 100 ? 'completed' : 'in_progress' }) }),
   streamUrl: (courseId: string, assetId: string) => request<{ url: string }>(`/api/v1/learner/courses/${courseId}/media/${assetId}/stream-url`),

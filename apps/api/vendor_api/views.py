@@ -307,6 +307,18 @@ class VendorCourseArchiveView(VendorAPIView):
         return Response(VendorCourseSerializer(course).data)
 
 
+class VendorCourseRestoreView(VendorAPIView):
+    def post(self, request: Request, course_id: uuid.UUID) -> Response:
+        _, course = _course_context(
+            request, course_id, (VendorMember.Role.OWNER, VendorMember.Role.EDITOR)
+        )
+        course.status = (
+            Course.Status.PUBLISHED if course.current_revision_id else Course.Status.DRAFT
+        )
+        course.save(update_fields=("status", "updated_at"))
+        return Response(VendorCourseSerializer(course).data)
+
+
 class VendorCourseStructureView(VendorAPIView):
     def get(self, request: Request, course_id: uuid.UUID) -> Response:
         _, course = _course_context(request, course_id)
@@ -427,7 +439,7 @@ class VendorCourseStructureView(VendorAPIView):
                     if content_type == ContentUnit.Type.TEXT
                     else None,
                     media_asset=asset,
-                    is_downloadable=data.get("is_downloadable", True),
+                    is_downloadable=data.get("is_downloadable", False),
                 )
             except DjangoValidationError as error:
                 raise DRFValidationError(error.message_dict) from error

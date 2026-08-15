@@ -191,7 +191,7 @@ class ContentUnit(models.Model):
         on_delete=models.PROTECT,
         related_name="content_units",
     )
-    is_downloadable = models.BooleanField(default=True)
+    is_downloadable = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

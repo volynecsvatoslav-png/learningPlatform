@@ -122,6 +122,64 @@ describe('VendorPage', () => {
     expect(request).toBeDefined()
   })
 
+  it('confirms before archiving a course', async () => {
+    const course = { id: 'course-1', title: 'Draft course', slug: 'draft-course', short_description: '', description_markdown: '', cover_asset_id: null, status: 'draft', offline_revision: 1, published_revision: null }
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/api/v1/vendor/me')) return response({ email: 'owner@example.com', vendors: [{ id: 'vendor-1', name: 'Alpha', role: 'owner' }] })
+      if (url.endsWith('/api/v1/vendor/courses?vendor_id=vendor-1')) return response([course])
+      if (url.endsWith('/api/v1/vendor/courses/course-1/structure')) return response({ modules: [] })
+      if (url.endsWith('/api/v1/vendor/csrf')) return response({ csrfToken: 'csrf-token' })
+      return workspaceResponse(url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /Draft course/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Архивировать' }))
+
+    expect(confirm).toHaveBeenCalledWith('Архивировать курс? Он перестанет быть доступен ученикам.')
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      return url.endsWith('/archive')
+    })).toBe(false)
+  })
+
+  it('restores an archived course instead of offering archive', async () => {
+    const course = { id: 'course-1', title: 'Archived course', slug: 'archived-course', short_description: '', description_markdown: '', cover_asset_id: null, status: 'archived', offline_revision: 2, published_revision: 1 }
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/api/v1/vendor/me')) return response({ email: 'owner@example.com', vendors: [{ id: 'vendor-1', name: 'Alpha', role: 'owner' }] })
+      if (url.endsWith('/api/v1/vendor/courses?vendor_id=vendor-1')) return response([course])
+      if (url.endsWith('/api/v1/vendor/courses/course-1/structure')) return response({ modules: [] })
+      if (url.endsWith('/api/v1/vendor/csrf')) return response({ csrfToken: 'csrf-token' })
+      if (url.endsWith('/api/v1/vendor/courses/course-1/restore') && init?.method === 'POST') return response({ ...course, status: 'published' })
+      return workspaceResponse(url)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /Archived course/i }))
+
+    expect(await screen.findByRole('button', { name: 'Восстановить' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Архивировать' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Восстановить' }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input, init]) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        return url.endsWith('/api/v1/vendor/courses/course-1/restore') && init?.method === 'POST'
+      })).toBe(true)
+    })
+  })
+
+  it('labels media permission as offline access', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><NewContent lessonId="lesson-1" readyMedia={[]} act={vi.fn()} vendorId="vendor-1" transferMode="proxy" /></QueryClientProvider>)
+    fireEvent.change(screen.getByLabelText('Тип'), { target: { value: 'video' } })
+
+    expect(screen.getByLabelText('Разрешить офлайн-просмотр')).not.toBeChecked()
+    expect(screen.queryByText('Разрешить скачивание')).not.toBeInTheDocument()
+  })
+
   it('uploads a video in the editor, shows validation, and selects it when ready', async () => {
     class FakeXHR {
       upload = { onprogress: () => {} }

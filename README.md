@@ -109,7 +109,8 @@ docker run --rm -it --network host -v "${PWD}:/work" -w /work -e E2E_OWNER_EMAIL
 
 ## Ограничения
 
-- PWA manifest и базовый service worker подготовлены, но скачивание курса и полноценный offline-режим не реализованы.
+- Офлайн-пакеты работают только внутри установленной PWA: AES-GCM chunks хранятся в OPFS/IndexedDB и требуют действующую семидневную offline license. Это не абсолютная DRM-защита.
+- Docker frontend запускает Vite в development mode, где service worker не регистрируется; офлайн-воспроизведение проверяется в production build установленной PWA.
 - Learner session использует серверную Django session cookie; `device_id`, User-Agent и IP не используются как фактор блокировки.
 - E2E bootstrap доступен только при `DEBUG=true` и `E2E_BOOTSTRAP_ENABLED=true`; используйте его только на одноразовой чистой базе.
 - Rate limits, полный CSP/CORS hardening, production deployment и MFA относятся к итерации 1.5. MFA обязательно перед реальными продажами.

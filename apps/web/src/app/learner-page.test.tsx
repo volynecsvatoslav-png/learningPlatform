@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { LearnerPage } from './learner-page'
 
 function renderPage(path = '/app/') {
@@ -24,6 +24,7 @@ const courses = [
 const snapshot = {
   title: 'First course',
   description_markdown: '',
+  viewer: { email: 'learner@example.com', session_id: 'abcd1234' },
   modules: [{ id: 'module-1', title: 'Module', description: '', lessons: [
     { id: 'lesson-1', title: 'Completed lesson', description: '', content_units: [] },
     { id: 'lesson-2', title: 'Older lesson', description: '', content_units: [] },
@@ -100,5 +101,65 @@ describe('LearnerPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Continue here' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /отметить урок завершённым/i })).toBeInTheDocument()
+  })
+
+  it('renders learner video without a direct storage URL and with browser UI restrictions', async () => {
+    const videoSnapshot = {
+      ...snapshot,
+      modules: [{ id: 'module-1', title: 'Module', description: '', lessons: [{
+        id: 'lesson-video',
+        title: 'Video lesson',
+        description: '',
+        content_units: [
+          { id: 'unit-video', type: 'video', title: 'Protected video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: false },
+          { id: 'unit-audio', type: 'audio', title: 'Protected audio', position: 2, text_markdown: null, media_asset_id: 'asset-2', is_downloadable: false },
+        ],
+      }] }],
+    }
+    const proxyUrl = '/api/v1/learner/courses/course-1/media/asset-1/content'
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response([courses[0]])
+      if (url.endsWith('/stream-url')) return response({ url: proxyUrl })
+      if (url.includes('/progress')) return response([])
+      return response(videoSnapshot)
+    }))
+    const view = renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /First course/i }))
+
+    await waitFor(() => { expect(view.container.querySelector('video')).not.toBeNull() })
+    const video = view.container.querySelector('video')
+    const audio = view.container.querySelector('audio')
+    expect(video).toHaveAttribute('controlsList', 'nodownload noremoteplayback')
+    expect(video).toHaveAttribute('disablePictureInPicture')
+    expect(audio).toHaveAttribute('controlsList', 'nodownload noremoteplayback')
+    expect(video?.getAttribute('src')).toBe(proxyUrl)
+    expect(video?.outerHTML).not.toContain('private/')
+    expect(video?.outerHTML).not.toContain('s3')
+    expect(screen.getByText('learner@example.com · abcd1234')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Скачать курс' })).not.toBeInTheDocument()
+  })
+
+  it('shows course download only for media allowed for offline viewing', async () => {
+    const allowedSnapshot = {
+      ...snapshot,
+      modules: [{ id: 'module-1', title: 'Module', description: '', lessons: [{
+        id: 'lesson-video',
+        title: 'Video lesson',
+        description: '',
+        content_units: [{ id: 'unit-video', type: 'video', title: 'Video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: true }],
+      }] }],
+    }
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response([courses[0]])
+      if (url.includes('/progress')) return response([])
+      if (url.endsWith('/stream-url')) return response({ url: '/api/v1/learner/media' })
+      return response(allowedSnapshot)
+    }))
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /First course/i }))
+
+    expect(await screen.findByRole('button', { name: 'Скачать курс' })).toBeInTheDocument()
   })
 })

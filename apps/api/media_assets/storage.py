@@ -148,6 +148,7 @@ class S3ObjectStorage:
                 "Bucket": self.bucket,
                 "Key": key,
                 "ResponseCacheControl": "no-store",
+                "ResponseContentDisposition": "inline",
             },
             ExpiresIn=self.get_ttl_seconds,
             HttpMethod="GET",

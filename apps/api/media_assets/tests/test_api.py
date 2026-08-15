@@ -302,6 +302,7 @@ def test_proxy_content_supports_range_and_is_private(client: Client) -> None:
     assert response.status_code == 206
     assert response["Content-Range"] == "bytes 2-4/10"
     assert response["Content-Length"] == "3"
+    assert response["Content-Disposition"] == "inline"
     assert response["Accept-Ranges"] == "bytes"
     assert response["Cache-Control"] == "private, no-store"
     assert b"private/random-key" not in b"".join(response.streaming_content)

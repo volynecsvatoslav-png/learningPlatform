@@ -1,4 +1,5 @@
 import hashlib
+import math
 import secrets
 import uuid
 from typing import Any, cast
@@ -26,8 +27,9 @@ from learner.models import (
     LessonProgress,
     hash_access_token,
 )
+from learner.offline_license import issue_offline_license
 from learner.serializers import LearnerProgressSerializer
-from learning.models import Course
+from learning.models import Course, CourseRevision
 from media_assets.models import MediaAsset
 from media_assets.storage import get_storage
 from media_assets.views import serve_asset_content
@@ -149,6 +151,27 @@ def _snapshot_course(enrollment: Enrollment) -> dict[str, Any]:
     return cast(dict[str, Any], revision.snapshot_json)
 
 
+def _offline_asset_ids(snapshot: dict[str, Any]) -> set[str]:
+    return {
+        str(unit["media_asset_id"])
+        for module in snapshot.get("modules", [])
+        for lesson in module.get("lessons", [])
+        for unit in lesson.get("content_units", [])
+        if unit.get("media_asset_id") and unit.get("is_downloadable") is True
+    }
+
+
+def _revision_for_course(course: Course, revision_id: object) -> CourseRevision:
+    try:
+        parsed_revision_id = uuid.UUID(str(revision_id))
+    except ValueError as error:
+        raise Http404 from error
+    revision = CourseRevision.objects.filter(pk=parsed_revision_id, course=course).first()
+    if revision is None:
+        raise Http404
+    return revision
+
+
 class LearnerCourseListView(LearnerAPIView):
     def get(self, request: Request) -> Response:
         enrollments = (
@@ -185,7 +208,112 @@ class LearnerCourseDetailView(LearnerAPIView):
     def get(self, request: Request, course_id: uuid.UUID) -> Response:
         enrollment = _active_enrollment(_learner_user(request), course_id)
         snapshot = _snapshot_course(enrollment)
-        return Response(snapshot)
+        learner_session = cast(LearnerSession, request.auth)
+        return Response(
+            {
+                **snapshot,
+                "viewer": {
+                    "email": _learner_user(request).email,
+                    "session_id": str(learner_session.id)[:8],
+                },
+            }
+        )
+
+
+class LearnerOfflineManifestView(LearnerAPIView):
+    def get(self, request: Request, course_id: uuid.UUID) -> Response:
+        enrollment = _active_enrollment(_learner_user(request), course_id)
+        revision = enrollment.course.current_revision
+        if revision is None:
+            raise Http404
+        snapshot = cast(dict[str, Any], revision.snapshot_json)
+        asset_ids = _offline_asset_ids(snapshot)
+        assets = list(
+            MediaAsset.objects.filter(
+                pk__in=asset_ids,
+                vendor_id=enrollment.course.vendor_id,
+                status=MediaAsset.Status.READY,
+            ).order_by("id")
+        )
+        if len(assets) != len(asset_ids):
+            raise Http404
+        chunk_size = 4 * 1024 * 1024
+        response = Response(
+            {
+                "course_id": str(enrollment.course_id),
+                "revision_id": str(revision.id),
+                "revision": revision.revision_number,
+                "snapshot": {
+                    **snapshot,
+                    "viewer": {
+                        "email": _learner_user(request).email,
+                        "session_id": str(cast(LearnerSession, request.auth).id)[:8],
+                    },
+                },
+                "assets": [
+                    {
+                        "id": str(asset.id),
+                        "content_type": asset.content_type,
+                        "size_bytes": asset.size_bytes,
+                        "sha256": asset.sha256,
+                        "chunk_size": chunk_size,
+                        "chunk_count": math.ceil(asset.size_bytes / chunk_size),
+                    }
+                    for asset in assets
+                ],
+                "total_size": sum(asset.size_bytes for asset in assets),
+            }
+        )
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
+class LearnerOfflineLicenseView(LearnerAPIView):
+    def post(self, request: Request, course_id: uuid.UUID) -> Response:
+        enrollment = _active_enrollment(_learner_user(request), course_id)
+        revision_id = request.data.get("revision_id") or enrollment.course.current_revision_id
+        revision = _revision_for_course(enrollment.course, revision_id)
+        license_data = issue_offline_license(
+            learner=_learner_user(request),
+            course=enrollment.course,
+            revision=revision,
+            session=cast(LearnerSession, request.auth),
+        )
+        response = Response(
+            {
+                **license_data,
+                "current_revision_id": str(enrollment.course.current_revision_id),
+                "current_revision": enrollment.course.current_revision.revision_number
+                if enrollment.course.current_revision
+                else None,
+                "update_available": revision.id != enrollment.course.current_revision_id,
+            }
+        )
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
+class LearnerOfflineMediaContentView(LearnerAPIView):
+    def get(
+        self,
+        request: Request,
+        course_id: uuid.UUID,
+        revision_id: uuid.UUID,
+        asset_id: uuid.UUID,
+    ) -> StreamingHttpResponse:
+        enrollment = _active_enrollment(_learner_user(request), course_id)
+        revision = _revision_for_course(enrollment.course, revision_id)
+        snapshot = cast(dict[str, Any], revision.snapshot_json)
+        if str(asset_id) not in _offline_asset_ids(snapshot):
+            raise Http404
+        asset = MediaAsset.objects.filter(
+            pk=asset_id,
+            vendor_id=enrollment.course.vendor_id,
+            status=MediaAsset.Status.READY,
+        ).first()
+        if asset is None:
+            raise Http404
+        return serve_asset_content(request, asset)
 
 
 class LearnerProgressView(LearnerAPIView):

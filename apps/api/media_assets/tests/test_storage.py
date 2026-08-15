@@ -45,3 +45,4 @@ def test_presigned_get_is_short_lived_and_disables_caching() -> None:
     kwargs = client.generate_presigned_url.call_args.kwargs
     assert kwargs["ExpiresIn"] == 60
     assert kwargs["Params"]["ResponseCacheControl"] == "no-store"
+    assert kwargs["Params"]["ResponseContentDisposition"] == "inline"
