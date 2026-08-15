@@ -1,6 +1,8 @@
+import base64
 import json
 import secrets
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -8,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import jwt
 import pytest
+from django.contrib.sessions.models import Session
 from django.core.cache import cache
 from django.db import close_old_connections, connections
 from django.test import Client
@@ -82,6 +85,16 @@ def test_access_token_is_hashed_and_exchange_creates_server_session(client: Clie
         "email": learner.email,
         "session_id": str(session.id)[:8],
     }
+
+
+def test_learner_session_uses_dedicated_expiry(client: Client, settings) -> None:  # type: ignore[no-untyped-def]
+    settings.LEARNER_SESSION_AGE = 45 * 24 * 60 * 60
+    _, _, _, token = make_access()
+    session_login(client, token)
+    learner_session = LearnerSession.objects.get()
+    django_session = Session.objects.get(session_key=learner_session.session_key)
+    remaining = (django_session.expire_date - timezone.now()).total_seconds()
+    assert settings.LEARNER_SESSION_AGE - 5 <= remaining <= settings.LEARNER_SESSION_AGE
 
 
 def test_second_device_revokes_first_and_old_session_gets_code(client: Client) -> None:
@@ -243,6 +256,46 @@ def test_pwa_transfer_attempt_limit_and_server_rate_limit(settings) -> None:  # 
     assert limited.status_code == 429
     assert limited.json() == {"code": "PWA_TRANSFER_RATE_LIMITED"}
     assert limited["Cache-Control"] == "private, no-store"
+
+
+def test_pwa_transfer_rate_limit_is_isolated_by_transfer_id(settings) -> None:  # type: ignore[no-untyped-def]
+    cache.clear()
+    settings.PWA_TRANSFER_RATE_LIMIT = 1
+    destination = Client()
+
+    def code_for(transfer_id: uuid.UUID) -> str:
+        public_id = base64.urlsafe_b64encode(transfer_id.bytes).rstrip(b"=").decode("ascii")
+        return f"{public_id}.{'x' * 22}"
+
+    first_code = code_for(uuid.uuid4())
+    second_code = code_for(uuid.uuid4())
+    assert (
+        destination.post(
+            "/api/v1/learner/pwa-transfer/consume",
+            data={"code": first_code},
+            content_type="application/json",
+            REMOTE_ADDR="203.0.113.40",
+        ).status_code
+        == 403
+    )
+    assert (
+        destination.post(
+            "/api/v1/learner/pwa-transfer/consume",
+            data={"code": first_code},
+            content_type="application/json",
+            REMOTE_ADDR="203.0.113.40",
+        ).status_code
+        == 429
+    )
+    assert (
+        destination.post(
+            "/api/v1/learner/pwa-transfer/consume",
+            data={"code": second_code},
+            content_type="application/json",
+            REMOTE_ADDR="203.0.113.40",
+        ).status_code
+        == 403
+    )
 
 
 @pytest.mark.django_db(transaction=True)

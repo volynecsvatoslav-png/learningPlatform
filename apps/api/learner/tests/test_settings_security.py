@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_pri
 from config.offline_keys import (
     DEVELOPMENT_OFFLINE_LICENSE_PRIVATE_KEY_B64,
     DEVELOPMENT_OFFLINE_LICENSE_PUBLIC_JWK,
+    validate_offline_license_keys,
 )
 
 
@@ -58,6 +59,14 @@ def test_production_settings_require_private_offline_key() -> None:
     result = import_production_settings(private_key=None, public_jwk=None)
     assert result.returncode != 0
     assert "OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64 is required" in result.stderr
+
+
+def test_debug_settings_accept_empty_offline_key_pair() -> None:
+    private_key, public_jwk = validate_offline_license_keys(
+        debug=True, private_key_b64="", public_jwk_json=""
+    )
+    assert private_key == DEVELOPMENT_OFFLINE_LICENSE_PRIVATE_KEY_B64
+    assert public_jwk == DEVELOPMENT_OFFLINE_LICENSE_PUBLIC_JWK
 
 
 def test_production_settings_reject_development_offline_key() -> None:

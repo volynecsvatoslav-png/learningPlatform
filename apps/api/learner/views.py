@@ -82,6 +82,7 @@ def _replace_learner_session(request: Request, learner: User) -> LearnerSession:
     LearnerSession.objects.filter(learner=learner, revoked_at__isnull=True).update(revoked_at=now)
     request.session.flush()
     login(request._request, learner)
+    request.session.set_expiry(settings.LEARNER_SESSION_AGE)
     session_key = request.session.session_key
     if session_key is None:
         raise RuntimeError("Django did not create a learner session")
@@ -235,19 +236,15 @@ class PwaSessionTransferConsumeView(APIView):
 
     @method_decorator(csrf_protect)
     def post(self, request: Request) -> Response:
-        if pwa_transfer_rate_limited(request._request):
-            response = Response(
-                {"code": "PWA_TRANSFER_RATE_LIMITED"},
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-            )
-            response["Retry-After"] = str(settings.PWA_TRANSFER_RATE_WINDOW_SECONDS)
-            return _private_no_store(response)
-
         serializer = PwaSessionTransferConsumeSerializer(data=request.data)
         if not serializer.is_valid():
+            if pwa_transfer_rate_limited(request._request, None):
+                return self._rate_limited_response()
             return _invalid_transfer()
         code = serializer.validated_data["code"]
         transfer_id = _transfer_id(code)
+        if pwa_transfer_rate_limited(request._request, transfer_id):
+            return self._rate_limited_response()
         if transfer_id is None:
             return _invalid_transfer()
         learner_id = (
@@ -293,6 +290,15 @@ class PwaSessionTransferConsumeView(APIView):
         if not valid:
             return _invalid_transfer()
         return _private_no_store(Response({"ok": True}))
+
+    @staticmethod
+    def _rate_limited_response() -> Response:
+        response = Response(
+            {"code": "PWA_TRANSFER_RATE_LIMITED"},
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        response["Retry-After"] = str(settings.PWA_TRANSFER_RATE_WINDOW_SECONDS)
+        return _private_no_store(response)
 
 
 class LearnerLogoutView(LearnerAPIView):

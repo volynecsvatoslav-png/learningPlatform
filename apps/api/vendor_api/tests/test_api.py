@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pytest
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
+from django.core.cache import cache
 from django.test import Client, override_settings
 from django.utils import timezone
 from django.utils.encoding import force_bytes
@@ -65,6 +66,7 @@ def json_post(client: Client, path: str, data: dict[str, object]):
     return client.post(path, data=data, content_type="application/json")
 
 
+@override_settings(SESSION_COOKIE_AGE=1234, LEARNER_SESSION_AGE=9876)
 def test_vendor_login_is_session_based_and_rate_limited(client: Client) -> None:
     vendor = Vendor.objects.create(name="Alpha", slug="alpha")
     member("owner@example.com", vendor, VendorMember.Role.OWNER)
@@ -77,6 +79,7 @@ def test_vendor_login_is_session_based_and_rate_limited(client: Client) -> None:
 
     assert response.status_code == 200
     assert "sessionid" in client.cookies
+    assert 1200 <= client.session.get_expiry_age() <= 1234
     assert client.get("/api/v1/vendor/me").status_code == 200
 
 
@@ -101,9 +104,14 @@ def test_vendor_me_allows_owner_and_editor_of_active_vendor(client: Client) -> N
         assert response.json()["vendors"][0]["id"] == str(vendor.id)
 
 
-@override_settings(VENDOR_AUTH_RATE_LIMIT=1)
-def test_vendor_login_rate_limit_is_neutral(client: Client) -> None:
-    client.defaults["REMOTE_ADDR"] = "192.0.2.10"
+@override_settings(
+    VENDOR_AUTH_RATE_LIMIT=1,
+    TRUSTED_PROXY_CIDRS=("10.0.0.0/8",),
+)
+def test_vendor_login_rate_limit_uses_email_and_trusted_client_ip(client: Client) -> None:
+    cache.clear()
+    client.defaults["REMOTE_ADDR"] = "10.0.0.2"
+    client.defaults["HTTP_X_FORWARDED_FOR"] = "198.51.100.10"
     response = json_post(
         client,
         "/api/v1/vendor/auth/login",
@@ -116,8 +124,49 @@ def test_vendor_login_rate_limit_is_neutral(client: Client) -> None:
         "/api/v1/vendor/auth/login",
         {"email": "another@example.com", "password": PASSWORD},
     )
+    assert response.status_code == 401
+
+    response = json_post(
+        client,
+        "/api/v1/vendor/auth/login",
+        {"email": "MISSING@example.com", "password": PASSWORD},
+    )
     assert response.status_code == 429
     assert response.json() == {"code": "AUTH_RATE_LIMITED"}
+
+    client.defaults["HTTP_X_FORWARDED_FOR"] = "198.51.100.11"
+    response = json_post(
+        client,
+        "/api/v1/vendor/auth/login",
+        {"email": "missing@example.com", "password": PASSWORD},
+    )
+    assert response.status_code == 401
+
+
+@override_settings(
+    VENDOR_AUTH_RATE_LIMIT=1,
+    TRUSTED_PROXY_CIDRS=("10.0.0.0/8",),
+)
+def test_vendor_login_ignores_forwarded_ip_from_untrusted_peer(client: Client) -> None:
+    cache.clear()
+    client.defaults["REMOTE_ADDR"] = "192.0.2.50"
+    client.defaults["HTTP_X_FORWARDED_FOR"] = "198.51.100.20"
+    assert (
+        json_post(
+            client,
+            "/api/v1/vendor/auth/login",
+            {"email": "missing@example.com", "password": PASSWORD},
+        ).status_code
+        == 401
+    )
+
+    client.defaults["HTTP_X_FORWARDED_FOR"] = "198.51.100.21"
+    response = json_post(
+        client,
+        "/api/v1/vendor/auth/login",
+        {"email": "missing@example.com", "password": PASSWORD},
+    )
+    assert response.status_code == 429
 
 
 def test_backoffice_is_superuser_only(client: Client) -> None:

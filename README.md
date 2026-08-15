@@ -49,7 +49,9 @@ DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,https://example-tunnel.example
 
 ### Статический HTTPS-туннель
 
-Для удалённого просмотра используется `https://learningplatform.ru.tuna.am`. Туннель должен направляться только на локальный `http://127.0.0.1:5173`: API и медиа остаются same-origin и проходят через Vite proxy по `/api`; порты API, PostgreSQL, Mailpit и MinIO наружу не публикуются. Укажите домен в `PUBLIC_APP_URL`, `VITE_ALLOWED_HOSTS`, `DJANGO_ALLOWED_HOSTS` и `DJANGO_CSRF_TRUSTED_ORIGINS` без wildcard, затем пересоздайте контейнеры. После изменения домена переотправьте ученику ссылку доступа, чтобы новая ссылка содержала актуальный публичный адрес.
+Для удалённого просмотра используется `https://learningplatform.ru.tuna.am`. Туннель должен направляться только на локальный `http://127.0.0.1:5173`: API и медиа остаются same-origin и проходят через Vite proxy по `/api`; порты API, PostgreSQL, Mailpit и MinIO наружу не публикуются. Укажите домен в `PUBLIC_APP_URL`, `VITE_ALLOWED_HOSTS`, `DJANGO_ALLOWED_HOSTS` и `DJANGO_CSRF_TRUSTED_ORIGINS` без wildcard. `TRUSTED_PROXY_CIDRS` должен содержать только immediate proxy между клиентом и Django; Vite добавляет доверенную цепочку `X-Forwarded-For`. После изменения домена переотправьте ученику ссылку доступа, чтобы новая ссылка содержала актуальный публичный адрес.
+
+В DEBUG оставьте `OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64` и `VITE_OFFLINE_LICENSE_PUBLIC_JWK` пустыми — Compose подставит development-пару. При `DJANGO_DEBUG=false` обязательно задайте собственные согласованные private PKCS8 PEM (base64) и public P-256 JWK.
 
 ## Кабинет вендора
 
@@ -66,6 +68,7 @@ DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,https://example-tunnel.example
 3. Markdown, image, audio и video открываются через learner-scoped URL с `Cache-Control: private, no-store` и `Accept-Ranges: bytes`. В proxy mode URL остаётся same-origin; в presigned mode используется короткий signed URL. `object_key` в frontend не передаётся.
 4. Нажмите «Отметить урок завершённым». Прогресс сохраняется на сервере.
 5. Откройте ту же ссылку во втором browser context. Первая сессия при следующем API-запросе получает `SESSION_REVOKED` и показывает «Сессия открыта на другом устройстве»; второй context продолжает работать.
+6. Learner-сессия живёт `LEARNER_SESSION_AGE` (по умолчанию 30 дней); vendor/backoffice-сессия сохраняет общий восьмичасовой `SESSION_COOKIE_AGE`.
 
 ## Курсы и медиа
 

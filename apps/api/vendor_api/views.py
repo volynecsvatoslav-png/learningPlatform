@@ -120,9 +120,9 @@ class VendorAuthView(APIView):
 
     @method_decorator(csrf_protect)
     def post(self, request: Request) -> Response:
-        if auth_rate_limited(request._request, "login"):
+        email = User.objects.normalize_email_address(str(request.data.get("email", "")))
+        if auth_rate_limited(request._request, "login", email):
             return Response({"code": "AUTH_RATE_LIMITED"}, status=429)
-        email = str(request.data.get("email", ""))
         password = str(request.data.get("password", ""))
         user = authenticate(request._request, username=email, password=password)
         if user is None or not user.vendor_memberships.filter(vendor__status="active").exists():
@@ -136,8 +136,8 @@ class VendorPasswordResetRequestView(APIView):
 
     @method_decorator(csrf_protect)
     def post(self, request: Request) -> Response:
-        limited = auth_rate_limited(request._request, "password-reset")
         email = User.objects.normalize_email_address(str(request.data.get("email", "")))
+        limited = auth_rate_limited(request._request, "password-reset", email)
         if not limited:
             user = (
                 User.objects.filter(email=email, is_active=True)
