@@ -24,8 +24,9 @@ export type OfflineLicenseClaims = {
   course_id: string
   revision_id: string
   revision: number
+  access_pass_id: string
+  pass_generation: number
   device_id: string
-  session_id: string
   issued_at: number
   expires_at: number
   iat: number
@@ -50,7 +51,9 @@ export type OfflinePackage = {
   licenseToken: string
   licenseClaims: OfflineLicenseClaims
   learnerId: string
-  sessionId: string
+  deviceId: string
+  accessPassId: string
+  passGeneration: number
   snapshotIv: ArrayBuffer
   snapshotCiphertext: ArrayBuffer
   assets: OfflineAsset[]

@@ -17,6 +17,10 @@ function requestUrl(input: RequestInfo | URL) {
   return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
 }
 
+function requestBody(request?: { body?: BodyInit | null }): Record<string, unknown> {
+  return JSON.parse(request?.body as string | undefined ?? '{}') as Record<string, unknown>
+}
+
 function setStandalone(value: boolean) {
   vi.stubGlobal('matchMedia', vi.fn(() => ({
     matches: value,
@@ -52,12 +56,14 @@ describe('LearnerPage', () => {
     vi.unstubAllGlobals()
     Object.defineProperty(navigator, 'standalone', { configurable: true, value: false })
     window.localStorage.clear()
-    await new Promise<void>((resolve) => {
-      const request = indexedDB.deleteDatabase('learning-platform-offline')
-      request.onsuccess = () => { resolve() }
-      request.onerror = () => { resolve() }
-      request.onblocked = () => { resolve() }
-    })
+    for (const name of ['learning-platform-offline', 'lms-device']) {
+      await new Promise<void>((resolve) => {
+        const request = indexedDB.deleteDatabase(name)
+        request.onsuccess = () => { resolve() }
+        request.onerror = () => { resolve() }
+        request.onblocked = () => { resolve() }
+      })
+    }
   })
 
   it('shows all courses separately and opens only the selected course', async () => {
@@ -112,50 +118,15 @@ describe('LearnerPage', () => {
     expect(await screen.findByRole('heading', { name: 'Older lesson' })).toBeInTheDocument()
   })
 
-  it('opens a course from an access link and renders safe Markdown text nodes', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
-      const url = requestUrl(input)
-      if (url.includes('/access/')) return response({ email: 'learner@example.com', course_title: 'First course', ready: true })
-      if (url.endsWith('/session')) return response({ ok: true, course_id: 'course-1' })
-      if (url.includes('/progress')) return response([])
-      return response(snapshot)
-    }))
-    renderPage('/app/access/access-token')
-    await waitFor(() => { expect(window.location.pathname).toBe('/app/') })
-    fireEvent.click(await screen.findByRole('button', { name: /открыть курс/i }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Recent lesson' }))
-
-    expect(await screen.findByRole('heading', { name: 'Continue here' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /отметить урок завершённым/i })).toBeInTheDocument()
-  })
-
-  it('creates an in-memory transfer code in an authenticated browser tab', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
-      const url = requestUrl(input)
-      if (url.endsWith('/api/v1/learner/courses')) return response([courses[0]])
-      if (url.endsWith('/api/v1/learner/csrf')) return response({ csrfToken: 'learner-csrf' })
-      if (url.endsWith('/api/v1/learner/pwa-transfer')) return response({ code: 'transfer-code-only-in-memory', expires_at: '2099-01-01T10:00:00Z' }, 201)
-      if (url.includes('/progress')) return response([])
-      return response(snapshot)
-    }))
-    renderPage()
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Перенести вход в установленное приложение' }))
-
-    expect(await screen.findByText('transfer-code-only-in-memory')).toBeInTheDocument()
-    expect(window.localStorage.length).toBe(0)
-    expect(window.location.pathname).toBe('/app/')
-  })
-
-  it('consumes a transfer code in standalone mode and loads courses without restart', async () => {
-    setStandalone(true)
+  it('activates a device from an access fragment link and opens the catalog', async () => {
     let authenticated = false
     const requests: Array<{ url: string; body?: BodyInit | null }> = []
     vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, options) => {
       const url = requestUrl(input)
       requests.push({ url, body: options?.body })
       if (url.endsWith('/api/v1/learner/csrf')) return response({ csrfToken: 'learner-csrf' })
-      if (url.endsWith('/api/v1/learner/pwa-transfer/consume')) {
+      if (url.endsWith('/api/v1/auth/access/inspect')) return response({ challenge: 'challenge-1' })
+      if (url.endsWith('/api/v1/auth/access/exchange')) {
         authenticated = true
         return response({ ok: true })
       }
@@ -163,33 +134,96 @@ describe('LearnerPage', () => {
       if (url.includes('/progress')) return response([])
       return response(snapshot)
     }))
-    renderPage()
-
-    expect(await screen.findByRole('heading', { name: 'Перенос входа' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Код переноса'), { target: { value: 'one-time-transfer-code' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Перенести вход' }))
+    renderPage('/app/#access=access-token')
+    await waitFor(() => { expect(window.location.pathname).toBe('/app/') })
 
     expect(await screen.findByRole('heading', { name: 'Все курсы' })).toBeInTheDocument()
-    expect(window.location.pathname).toBe('/app/')
-    expect(requests.some((item) => item.url.includes('one-time-transfer-code'))).toBe(false)
-    expect(requests.find((item) => item.url.endsWith('/consume'))?.body).toBe(JSON.stringify({ code: 'one-time-transfer-code' }))
-    expect(window.localStorage.length).toBe(0)
+    const exchange = requests.find((item) => item.url.endsWith('/api/v1/auth/access/exchange'))
+    const body = requestBody(exchange)
+    expect(body.token).toBe('access-token')
+    expect(body.challenge).toBe('challenge-1')
+    expect(typeof body.signature).toBe('string')
+    expect((body.signature as string | undefined)?.length).toBeGreaterThan(0)
+    expect(body.installation_id).toBeTruthy()
+    expect(body.confirm_transfer).toBe(false)
+    expect(requests.some((item) => item.url.includes('access-token'))).toBe(false)
+    fireEvent.click(await screen.findByRole('button', { name: /First course/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Recent lesson' }))
+    expect(await screen.findByRole('heading', { name: 'Recent lesson' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Continue here' })).toBeInTheDocument()
   })
 
-  it('does not create a transfer when standalone PWA already has a session cookie', async () => {
-    setStandalone(true)
-    const fetchMock = vi.fn<typeof fetch>((input) => {
+  it('asks to confirm a device transfer and replaces the active session', async () => {
+    let authenticated = false
+    const requests: Array<{ url: string; body?: BodyInit | null }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, options) => {
       const url = requestUrl(input)
-      if (url.endsWith('/api/v1/learner/courses')) return response(courses)
+      requests.push({ url, body: options?.body })
+      if (url.endsWith('/api/v1/learner/csrf')) return response({ csrfToken: 'learner-csrf' })
+      if (url.endsWith('/api/v1/auth/access/inspect')) return response({ challenge: 'challenge-1' })
+      if (url.endsWith('/api/v1/auth/access/exchange')) {
+        const body = requestBody(options)
+        if (!body.confirm_transfer) return response({ code: 'DEVICE_TRANSFER_CONFIRMATION_REQUIRED' }, 409)
+        authenticated = true
+        return response({ ok: true })
+      }
+      if (url.endsWith('/api/v1/learner/courses')) return authenticated ? response(courses) : response({ code: 'NOT_AUTHENTICATED' }, 401)
       if (url.includes('/progress')) return response([])
       return response(snapshot)
-    })
-    vi.stubGlobal('fetch', fetchMock)
+    }))
+    renderPage('/app/#access=access-token')
+
+    expect(await screen.findByRole('heading', { name: 'Перенос входа' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Перенести вход на это устройство' }))
+
+    expect(await screen.findByRole('heading', { name: 'Все курсы' })).toBeInTheDocument()
+    const confirmed = requests.filter((item) => item.url.endsWith('/api/v1/auth/access/exchange'))
+    expect(confirmed).toHaveLength(2)
+    expect(requestBody(confirmed[1])).toMatchObject({ confirm_transfer: true, token: 'access-token' })
+  })
+
+  it('shows a session-ended screen when the heartbeat detects a replaced session', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response(courses)
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ code: 'SESSION_REPLACED' }, 401)
+      if (url.includes('/progress')) return response([])
+      return response(snapshot)
+    }))
     renderPage()
 
     expect(await screen.findByRole('heading', { name: 'Все курсы' })).toBeInTheDocument()
-    expect(screen.queryByLabelText('Код переноса')).not.toBeInTheDocument()
-    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).includes('/pwa-transfer'))).toBe(false)
+    expect(await screen.findByRole('heading', { name: 'Сессия завершена' })).toBeInTheDocument()
+    expect(screen.getByText('Вход выполнен на другом устройстве. Доступ к этому устройству закрыт.')).toBeInTheDocument()
+  })
+
+  it('recovers access from a recovery fragment link and signs the request', async () => {
+    let authenticated = false
+    const requests: Array<{ url: string; body?: BodyInit | null }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, options) => {
+      const url = requestUrl(input)
+      requests.push({ url, body: options?.body })
+      if (url.endsWith('/api/v1/learner/csrf')) return response({ csrfToken: 'learner-csrf' })
+      if (url.endsWith('/api/v1/auth/recovery/exchange')) return response({ ok: true, access_token: 'fresh-token', access_link: 'https://learning.example/app/#access=fresh-token' })
+      if (url.endsWith('/api/v1/auth/access/inspect')) return response({ challenge: 'challenge-1' })
+      if (url.endsWith('/api/v1/auth/access/exchange')) {
+        authenticated = true
+        return response({ ok: true })
+      }
+      if (url.endsWith('/api/v1/learner/courses')) return authenticated ? response(courses) : response({ code: 'NOT_AUTHENTICATED' }, 401)
+      if (url.includes('/progress')) return response([])
+      return response(snapshot)
+    }))
+    renderPage('/app/#recovery=recovery-token')
+
+    expect(await screen.findByRole('heading', { name: 'Все курсы' })).toBeInTheDocument()
+    const recovery = requests.find((item) => item.url.endsWith('/api/v1/auth/recovery/exchange'))
+    const body = requestBody(recovery)
+    expect(body.recovery_token).toBe('recovery-token')
+    expect(body.installation_id).toBeTruthy()
+    expect(body.public_key_jwk).toMatchObject({ kty: 'EC', crv: 'P-256' })
+    expect(typeof body.signature).toBe('string')
+    expect(requests.some((item) => item.url.includes('recovery-token'))).toBe(false)
   })
 
   it('accepts a pasted email link in standalone mode without navigating to it', async () => {
@@ -200,9 +234,10 @@ describe('LearnerPage', () => {
       const url = requestUrl(input)
       requests.push({ url, body: options?.body })
       if (url.endsWith('/api/v1/learner/csrf')) return response({ csrfToken: 'learner-csrf' })
-      if (url.endsWith('/api/v1/learner/session')) {
+      if (url.endsWith('/api/v1/auth/access/inspect')) return response({ challenge: 'challenge-1' })
+      if (url.endsWith('/api/v1/auth/access/exchange')) {
         authenticated = true
-        return response({ ok: true, course_id: 'course-1' })
+        return response({ ok: true })
       }
       if (url.endsWith('/api/v1/learner/courses')) return authenticated ? response(courses) : response({ code: 'NOT_AUTHENTICATED' }, 401)
       if (url.includes('/progress')) return response([])
@@ -210,15 +245,51 @@ describe('LearnerPage', () => {
     }))
     renderPage()
 
-    await screen.findByRole('heading', { name: 'Перенос входа' })
-    fireEvent.click(screen.getByText('Резервный вход по ссылке из письма'))
-    fireEvent.change(screen.getByLabelText('Полная ссылка из письма'), { target: { value: 'https://learning.example/app/access/email-secret-token' } })
+    await screen.findByRole('heading', { name: 'Вход в кабинет ученика' })
+    fireEvent.change(screen.getByLabelText('Полная ссылка из письма'), { target: { value: 'https://learning.example/app/#access=pasted-token' } })
     fireEvent.click(screen.getByRole('button', { name: 'Войти по ссылке' }))
 
     expect(await screen.findByRole('heading', { name: 'Все курсы' })).toBeInTheDocument()
     expect(window.location.pathname).toBe('/app/')
-    expect(requests.some((item) => item.url.includes('email-secret-token'))).toBe(false)
-    expect(requests.find((item) => item.url.endsWith('/session'))?.body).toBe(JSON.stringify({ token: 'email-secret-token' }))
+    expect(requests.some((item) => item.url.includes('pasted-token'))).toBe(false)
+    expect(requests.find((item) => item.url.endsWith('/api/v1/auth/access/exchange'))?.body).toContain('pasted-token')
+  })
+
+  it('sends a recovery request with the entered email', async () => {
+    setStandalone(true)
+    const requests: Array<{ url: string; body?: BodyInit | null }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, options) => {
+      const url = requestUrl(input)
+      requests.push({ url, body: options?.body })
+      if (url.endsWith('/api/v1/learner/csrf')) return response({ csrfToken: 'learner-csrf' })
+      if (url.endsWith('/api/v1/auth/recovery/request')) return response({ ok: true })
+      return response({ code: 'NOT_AUTHENTICATED' }, 401)
+    }))
+    renderPage()
+
+    fireEvent.click(await screen.findByText('Восстановить доступ'))
+    fireEvent.change(screen.getByLabelText('Email ученика'), { target: { value: 'learner@example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить ссылку восстановления' }))
+
+    expect(await screen.findByText(/Письмо отправлено/)).toBeInTheDocument()
+    const recoveryRequest = requests.find((item) => item.url.endsWith('/api/v1/auth/recovery/request'))
+    expect(recoveryRequest?.body).toContain('learner@example.com')
+  })
+
+  it('does not show transfer UI when the session cookie is already present', async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response(courses)
+      if (url.includes('/progress')) return response([])
+      return response(snapshot)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Все курсы' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Перенос входа' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).includes('/pwa-transfer'))).toBe(false)
+    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).includes('/api/v1/auth/heartbeat'))).toBe(true)
   })
 
   it('renders learner video without a direct storage URL and with browser UI restrictions', async () => {
@@ -285,8 +356,8 @@ describe('LearnerPage', () => {
     const offlinePackage: OfflinePackage = {
       courseId: 'course-1', packageId: 'package-1', revisionId: 'revision-1', revision: 1,
       title: 'First course', shortDescription: '', licenseToken: 'fixture',
-      licenseClaims: { license_id: 'license', learner_id: 'learner-1', course_id: 'course-1', revision_id: 'revision-1', revision: 1, device_id: 'device', session_id: 'session', issued_at: 1, expires_at: 4102444800, iat: 1, exp: 4102444800 },
-      learnerId: 'learner-1', sessionId: 'session', snapshotIv: new ArrayBuffer(12), snapshotCiphertext: new ArrayBuffer(1),
+      licenseClaims: { license_id: 'license', learner_id: 'learner-1', course_id: 'course-1', revision_id: 'revision-1', revision: 1, access_pass_id: 'pass-1', pass_generation: 1, device_id: 'device', issued_at: 1, expires_at: 4102444800, iat: 1, exp: 4102444800 },
+      learnerId: 'learner-1', deviceId: 'device', accessPassId: 'pass-1', passGeneration: 1, snapshotIv: new ArrayBuffer(12), snapshotCiphertext: new ArrayBuffer(1),
       assets: [{ id: 'asset-1', content_type: 'video/mp4', size_bytes: 6, sha256: '0'.repeat(64), chunk_size: 4, chunk_count: 2 }],
       totalSize: 6, storageKind: 'idb', status: 'ready', updateAvailable: false, createdAt: Date.now(),
     }

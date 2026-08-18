@@ -73,7 +73,19 @@ export type LearnerProgress = {
   completed_at: string | null
   updated_at: string
 }
-export type PwaSessionTransfer = { code: string; expires_at: string }
+export type LearnerActivationChallenge = { challenge: string }
+export type LearnerActivationResult = { ok: true; session_id?: string }
+export type LearnerMe = {
+  email: string
+  vendor_id: string
+  vendor_name: string
+  device_id: string
+  installation_id: string
+  generation: number
+}
+export type LearnerHeartbeat = { generation: number; expires_at: string | null }
+export type RecoveryRequestResult = { ok: true; message: string }
+export type RecoveryExchangeResult = { ok: true; access_token: string; access_link: string }
 export type MediaTransferMode = 'proxy' | 'presigned'
 
 type CsrfScope = 'vendor' | 'learner'
@@ -117,7 +129,7 @@ export async function csrf(scope: CsrfScope = 'vendor'): Promise<string> {
   return csrfTokens[scope]
 }
 
-function resetCsrfTokens() {
+export function resetCsrfTokens() {
   csrfTokens.vendor = ''
   csrfTokens.learner = ''
 }
@@ -205,21 +217,50 @@ export const vendorApi = {
 }
 
 export const learnerApi = {
-  access: (token: string) => request<{ email: string; course_title: string; ready: boolean }>(`/api/v1/learner/access/${encodeURIComponent(token)}`),
-  login: async (token: string) => {
-    const result = await request<{ ok: true; course_id: string }>('/api/v1/learner/session', { method: 'POST', body: JSON.stringify({ token }), cache: 'no-store' }, 'learner')
-    resetCsrfTokens()
-    return result
-  },
-  createPwaTransfer: () => request<PwaSessionTransfer>('/api/v1/learner/pwa-transfer', { method: 'POST', cache: 'no-store' }, 'learner'),
-  consumePwaTransfer: async (code: string) => {
-    const result = await request<{ ok: true }>('/api/v1/learner/pwa-transfer/consume', { method: 'POST', body: JSON.stringify({ code }), cache: 'no-store' }, 'learner')
-    resetCsrfTokens()
-    return result
-  },
+  inspect: (token: string, installationId: string, publicKeyJwk: JsonWebKey) =>
+    request<LearnerActivationChallenge>(
+      '/api/v1/auth/access/inspect',
+      { method: 'POST', body: JSON.stringify({ token, installation_id: installationId, public_key_jwk: publicKeyJwk }) },
+      'learner',
+    ),
+  exchange: (data: { token: string; installationId: string; publicKeyJwk: JsonWebKey; challenge: string; signature: string; confirmTransfer?: boolean }) =>
+    request<LearnerActivationResult>(
+      '/api/v1/auth/access/exchange',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          token: data.token,
+          installation_id: data.installationId,
+          public_key_jwk: data.publicKeyJwk,
+          challenge: data.challenge,
+          signature: data.signature,
+          confirm_transfer: data.confirmTransfer ?? false,
+        }),
+        cache: 'no-store',
+      },
+      'learner',
+    ),
+  me: () => request<LearnerMe>('/api/v1/auth/me', { cache: 'no-store' }, 'learner'),
+  heartbeat: () => request<LearnerHeartbeat>('/api/v1/auth/heartbeat', { method: 'POST', cache: 'no-store' }, 'learner'),
+  recoveryRequest: (email: string) => request<RecoveryRequestResult>('/api/v1/auth/recovery/request', { method: 'POST', body: JSON.stringify({ email }), cache: 'no-store' }, 'learner'),
+  recoveryExchange: (data: { recoveryToken: string; installationId: string; publicKeyJwk: JsonWebKey; signature: string }) =>
+    request<RecoveryExchangeResult>(
+      '/api/v1/auth/recovery/exchange',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          recovery_token: data.recoveryToken,
+          installation_id: data.installationId,
+          public_key_jwk: data.publicKeyJwk,
+          signature: data.signature,
+        }),
+        cache: 'no-store',
+      },
+      'learner',
+    ),
   logout: async () => {
     try {
-      return await request<{ ok: true }>('/api/v1/learner/logout', { method: 'POST' }, 'learner')
+      return await request<{ ok: true }>('/api/v1/auth/logout', { method: 'POST' }, 'learner')
     } finally {
       resetCsrfTokens()
     }

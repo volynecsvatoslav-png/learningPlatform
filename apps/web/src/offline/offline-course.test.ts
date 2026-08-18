@@ -6,6 +6,16 @@ import { downloadOfflineCourse, getOfflinePackage, offlineMediaUrl, readOfflineS
 import { OFFLINE_LICENSE_PUBLIC_JWK } from './license-key'
 import type { OfflineLicense, OfflineManifest } from './types'
 
+const deviceStub = vi.hoisted(() => ({
+  installation_id: 'device-1',
+  public_key_jwk: { kty: 'EC', crv: 'P-256', x: 'x-coordinate', y: 'y-coordinate' },
+  sign: (message: string) => Promise.resolve(`signature:${message}`),
+}))
+vi.mock('../lib/device-keys', () => ({
+  getAccessDevice: () => Promise.resolve(deviceStub),
+  sha256Hex: (value: string) => Promise.resolve(value),
+}))
+
 const snapshot: LearnerSnapshot = {
   title: 'Offline course',
   short_description: 'Stored privately',
@@ -94,7 +104,7 @@ describe('offline course storage', () => {
 
   it('verifies the Django ES256 fixture with the pinned WebCrypto key', async () => {
     expect(OFFLINE_LICENSE_PUBLIC_JWK).toMatchObject(fixture.publicJwk)
-    await expect(verifyOfflineLicense(fixture.tokens['revision-1'], { courseId: 'course-1', revisionId: 'revision-1', learnerId: 'learner-1', sessionId: 'session-1' })).resolves.toMatchObject({ learner_id: 'learner-1', session_id: 'session-1' })
+    await expect(verifyOfflineLicense(fixture.tokens['revision-1'], { courseId: 'course-1', revisionId: 'revision-1', learnerId: 'learner-1', deviceId: 'device-1', accessPassId: 'pass-1', passGeneration: 1 })).resolves.toMatchObject({ learner_id: 'learner-1', device_id: 'device-1', access_pass_id: 'pass-1', pass_generation: 1 })
   })
 
   it('reports insufficient private storage before downloading media', async () => {

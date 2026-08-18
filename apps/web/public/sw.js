@@ -10,6 +10,7 @@ function isSensitivePath(pathname) {
   return /^\/app\/access(?:\/|$)/.test(pathname)
     || /^\/vendor\/reset(?:\/|$)/.test(pathname)
     || /^\/api\/v1\/learner\/(?:access|csrf|session|logout|pwa-transfer)(?:\/|$)/.test(pathname)
+    || /^\/api\/v1\/auth\/(?:access|recovery|me|heartbeat|logout)(?:\/|$)/.test(pathname)
     || /^\/api\/v1\/vendor\/(?:csrf|auth)(?:\/|$)/.test(pathname)
 }
 
@@ -84,7 +85,7 @@ async function verifyLicense(offlinePackage) {
   if (!Number.isSafeInteger(claims.iat) || claims.iat * 1000 > Date.now() + 5 * 60 * 1000) throw new Error('OFFLINE_LICENSE_INVALID')
   if (claims.expires_at * 1000 <= Date.now()) throw new Error('OFFLINE_LICENSE_EXPIRED')
   if (claims.exp !== claims.expires_at || claims.issued_at !== claims.iat) throw new Error('OFFLINE_LICENSE_INVALID')
-  if (claims.course_id !== offlinePackage.courseId || claims.revision_id !== offlinePackage.revisionId || claims.learner_id !== offlinePackage.learnerId || claims.session_id !== offlinePackage.sessionId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (claims.course_id !== offlinePackage.courseId || claims.revision_id !== offlinePackage.revisionId || claims.learner_id !== offlinePackage.learnerId || claims.device_id !== offlinePackage.deviceId || claims.access_pass_id !== offlinePackage.accessPassId || claims.pass_generation !== offlinePackage.passGeneration) throw new Error('OFFLINE_LICENSE_INVALID')
   return claims
 }
 

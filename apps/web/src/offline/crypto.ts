@@ -35,7 +35,7 @@ export function decodeLicenseClaims(token: string): OfflineLicenseClaims {
   return JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as OfflineLicenseClaims
 }
 
-export async function verifyOfflineLicense(token: string, expected: { courseId: string; revisionId: string; learnerId?: string; sessionId?: string }, now = Date.now()): Promise<OfflineLicenseClaims> {
+export async function verifyOfflineLicense(token: string, expected: { courseId: string; revisionId: string; learnerId?: string; deviceId?: string; accessPassId?: string; passGeneration?: number }, now = Date.now()): Promise<OfflineLicenseClaims> {
   const parts = token.split('.')
   if (parts.length !== 3) throw new Error('OFFLINE_LICENSE_INVALID')
   const [header, payload, signature] = parts
@@ -55,9 +55,11 @@ export async function verifyOfflineLicense(token: string, expected: { courseId: 
   if (!Number.isSafeInteger(claims.iat) || issuedAt > now + 5 * 60 * 1000) throw new Error('OFFLINE_LICENSE_INVALID')
   if (claims.expires_at * 1000 <= now) throw new Error('OFFLINE_LICENSE_EXPIRED')
   if (claims.exp !== claims.expires_at || claims.issued_at !== claims.iat) throw new Error('OFFLINE_LICENSE_INVALID')
-  if (!claims.learner_id || !claims.session_id) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (!claims.learner_id || !claims.device_id || !claims.access_pass_id) throw new Error('OFFLINE_LICENSE_INVALID')
   if (claims.course_id !== expected.courseId || claims.revision_id !== expected.revisionId) throw new Error('OFFLINE_LICENSE_INVALID')
   if (expected.learnerId && claims.learner_id !== expected.learnerId) throw new Error('OFFLINE_LICENSE_INVALID')
-  if (expected.sessionId && claims.session_id !== expected.sessionId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (expected.deviceId && claims.device_id !== expected.deviceId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (expected.accessPassId && claims.access_pass_id !== expected.accessPassId) throw new Error('OFFLINE_LICENSE_INVALID')
+  if (expected.passGeneration !== undefined && claims.pass_generation !== expected.passGeneration) throw new Error('OFFLINE_LICENSE_INVALID')
   return claims
 }

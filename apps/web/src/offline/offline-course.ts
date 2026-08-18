@@ -1,4 +1,5 @@
 import { ApiError, learnerApi, type LearnerCourse, type LearnerSnapshot } from '../lib/api'
+import { getAccessDevice } from '../lib/device-keys'
 import { createSHA256 } from 'hash-wasm'
 import { chunkAad, createOfflineKey, decryptChunk, encryptChunk, verifyOfflineLicense } from './crypto'
 import { deleteChunks, deleteKey, deletePackageRecord, getKey, getPackage, getPackages, putChunk, putKey, putPackage } from './db'
@@ -80,7 +81,8 @@ export async function downloadOfflineCourse(courseId: string, onProgress: (loade
   const storage = navigator.storage as StorageManager | undefined
   if (storage) await storage.persist()
   const license = await learnerApi.offlineLicense(courseId, manifest.revision_id)
-  const claims = await verifyOfflineLicense(license.token, { courseId, revisionId: manifest.revision_id })
+  const device = await getAccessDevice()
+  const claims = await verifyOfflineLicense(license.token, { courseId, revisionId: manifest.revision_id, deviceId: device.installation_id })
   if (claims.course_id !== courseId || claims.revision_id !== manifest.revision_id) throw new OfflineDownloadError('OFFLINE_LICENSE_INVALID', 'Сервер вернул некорректную офлайн-лицензию.')
 
   const packageId = `${courseId}:${manifest.revision_id}:attempt:${crypto.randomUUID()}`
@@ -140,7 +142,9 @@ export async function downloadOfflineCourse(courseId: string, onProgress: (loade
       licenseToken: license.token,
       licenseClaims: claims,
       learnerId: claims.learner_id,
-      sessionId: claims.session_id,
+      deviceId: claims.device_id,
+      accessPassId: claims.access_pass_id,
+      passGeneration: claims.pass_generation,
       snapshotIv: snapshotEncrypted.iv,
       snapshotCiphertext: snapshotEncrypted.ciphertext,
       assets: manifest.assets,
@@ -193,7 +197,14 @@ export async function syncOfflineCourse(courseId: string): Promise<OfflinePackag
   if (!offlinePackage) return undefined
   try {
     const license = await learnerApi.offlineLicense(courseId, offlinePackage.revisionId)
-    const claims = await verifyOfflineLicense(license.token, { courseId, revisionId: offlinePackage.revisionId, learnerId: offlinePackage.learnerId, sessionId: offlinePackage.sessionId })
+    const claims = await verifyOfflineLicense(license.token, {
+      courseId,
+      revisionId: offlinePackage.revisionId,
+      learnerId: offlinePackage.learnerId,
+      deviceId: offlinePackage.deviceId,
+      accessPassId: offlinePackage.accessPassId,
+      passGeneration: offlinePackage.passGeneration,
+    })
     const updated = { ...offlinePackage, licenseToken: license.token, licenseClaims: claims, updateAvailable: false }
     await putPackage(updated)
     return updated
