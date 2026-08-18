@@ -32,9 +32,18 @@ async function waitForMail(
       && message.To[0]?.Address.toLowerCase() === recipient.toLowerCase(),
     )
     return matches.length
-  }, { message: `waiting for one access email to ${recipient}`, timeout: 30_000 }).toBe(1)
+  }, { message: `waiting for one email "${subject}" to ${recipient}`, timeout: 30_000 }).toBe(1)
 
   return matches[0]
+}
+
+async function mailURL(request: APIRequestContext, mailpitURL: string, message: MailpitMessage): Promise<URL> {
+  const detail = await request.get(new URL(`/api/v1/message/${encodeURIComponent(message.ID)}`, mailpitURL).toString())
+  expect(detail.ok()).toBeTruthy()
+  const body = await detail.json() as { Text?: string }
+  const match = body.Text?.match(/https?:\/\/[^\s]+\/app\/[^\s]*/)?.[0]
+  expect(match).toBeTruthy()
+  return new URL(match as string)
 }
 
 async function sessionStatus(page: Page): Promise<{ status: number; code?: string }> {
@@ -45,11 +54,11 @@ async function sessionStatus(page: Page): Promise<{ status: number; code?: strin
   })
 }
 
-test('installed PWA consumes a transfer code and replaces the browser session', async ({
+test('device activation transfers access with confirmation and recovers it', async ({
   browser,
   request,
 }) => {
-  test.setTimeout(120_000)
+  test.setTimeout(180_000)
   const ownerEmail = requiredEnvironment('E2E_OWNER_EMAIL')
   const ownerPassword = requiredEnvironment('E2E_OWNER_PASSWORD')
   const vendorName = requiredEnvironment('E2E_VENDOR_NAME')
@@ -63,7 +72,8 @@ test('installed PWA consumes a transfer code and replaces the browser session', 
   const contentTitle = `E2E content ${unique}`
   const lessonContent = `# E2E content ${unique}`
   const learnerEmail = `learner-${unique}@example.com`
-  const expectedSubject = `Доступ к курсу: ${courseTitle}`
+  const expectedSubject = `Доступ к курсам: ${vendorName}`
+  const recoverySubject = 'Восстановление доступа к обучению'
 
   const vendorContext = await browser.newContext({ baseURL })
   const vendor = await vendorContext.newPage()
@@ -147,67 +157,50 @@ test('installed PWA consumes a transfer code and replaces the browser session', 
   expect((await grantResponsePromise).ok()).toBeTruthy()
   await expect(accessPanel.getByText(learnerEmail, { exact: true })).toBeVisible()
 
-  const message = await waitForMail(request, mailpitURL, learnerEmail, expectedSubject)
-  const detail = await request.get(new URL(`/api/v1/message/${encodeURIComponent(message.ID)}`, mailpitURL).toString())
-  expect(detail.ok()).toBeTruthy()
-  const body = await detail.json() as { Text?: string }
-  const emailedAccessURL = body.Text?.match(/https?:\/\/[^\s]+\/app\/[^\s]*/)?.[0]
-  expect(emailedAccessURL).toBeTruthy()
-  const parsedAccessURL = new URL(emailedAccessURL as string)
-  const accessPath = `${parsedAccessURL.pathname}${parsedAccessURL.search}${parsedAccessURL.hash}`
+  const accessMessage = await waitForMail(request, mailpitURL, learnerEmail, expectedSubject)
+  const accessURL = await mailURL(request, mailpitURL, accessMessage)
   await vendorContext.close()
 
   const first = await browser.newContext({ baseURL })
   const firstPage = await first.newPage()
-  await firstPage.goto(accessPath)
-  await expect(firstPage.getByRole('heading', { name: 'Персональный доступ' })).toBeVisible()
-  await firstPage.getByRole('button', { name: /Открыть курс/ }).click()
+  await firstPage.goto(accessURL.toString())
+  await expect(firstPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
+  await firstPage.getByRole('button', { name: new RegExp(courseTitle) }).click()
   await expect(firstPage.getByRole('heading', { name: courseTitle })).toBeVisible()
   await expect(firstPage.getByText(`E2E content ${unique}`, { exact: true })).toBeVisible()
-  await firstPage.getByRole('button', { name: /Все курсы/ }).click()
-  const transferResponsePromise = firstPage.waitForResponse((response) =>
-    response.request().method() === 'POST'
-    && response.url().endsWith('/api/v1/learner/pwa-transfer'),
-  )
-  await firstPage.getByRole('button', { name: 'Перенести вход в установленное приложение' }).click()
-  expect((await transferResponsePromise).status()).toBe(201)
-  const transferCode = await firstPage.locator('output[aria-label="Код переноса"]').textContent()
-  expect(transferCode).toBeTruthy()
 
   const second = await browser.newContext({ baseURL })
-  await second.addInitScript(() => {
-    const regularMatchMedia = window.matchMedia.bind(window)
-    window.matchMedia = (query: string) => query === '(display-mode: standalone)'
-      ? {
-          matches: true,
-          media: query,
-          onchange: null,
-          addListener: () => undefined,
-          removeListener: () => undefined,
-          addEventListener: () => undefined,
-          removeEventListener: () => undefined,
-          dispatchEvent: () => true,
-        }
-      : regularMatchMedia(query)
-    Object.defineProperty(navigator, 'standalone', { configurable: true, value: true })
-  })
   const secondPage = await second.newPage()
-  await secondPage.goto('/app/')
+  await secondPage.goto(accessURL.toString())
   await expect(secondPage.getByRole('heading', { name: 'Перенос входа' })).toBeVisible()
-  await secondPage.getByLabel('Код переноса').fill(transferCode as string)
-  await secondPage.getByRole('button', { name: 'Перенести вход' }).click()
+  await secondPage.getByRole('button', { name: 'Перенести вход на это устройство' }).click()
   await expect(secondPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
-  await expect(secondPage.getByRole('button', { name: new RegExp(courseTitle) })).toBeVisible()
-
-  expect(await sessionStatus(firstPage)).toEqual({ status: 401, code: 'SESSION_REVOKED' })
-  await firstPage.reload()
-  await expect(firstPage.getByRole('heading', { name: /Сессия открыта на другом устройстве/ })).toBeVisible()
-
-  expect((await sessionStatus(secondPage)).status).toBe(200)
   await secondPage.getByRole('button', { name: new RegExp(courseTitle) }).click()
   await expect(secondPage.getByRole('heading', { name: courseTitle })).toBeVisible()
   await expect(secondPage.getByText(`E2E content ${unique}`, { exact: true })).toBeVisible()
-  await expect(secondPage.getByRole('button', { name: /Отметить урок завершённым/ })).toBeVisible()
+
+  expect(await sessionStatus(firstPage)).toEqual({ status: 401, code: 'SESSION_REPLACED' })
+  await firstPage.reload()
+  await expect(firstPage.getByRole('heading', { name: 'Сессия завершена' })).toBeVisible()
+  await firstPage.getByRole('button', { name: 'Выйти' }).click()
+  await expect(firstPage.getByRole('heading', { name: 'Вход в кабинет ученика' })).toBeVisible()
+
+  await firstPage.getByText('Восстановить доступ').click()
+  await firstPage.getByLabel('Email ученика').fill(learnerEmail)
+  const recoveryRequestPromise = firstPage.waitForResponse((response) =>
+    response.request().method() === 'POST' && response.url().endsWith('/api/v1/auth/recovery/request'),
+  )
+  await firstPage.getByRole('button', { name: 'Отправить ссылку восстановления' }).click()
+  expect((await recoveryRequestPromise).ok()).toBeTruthy()
+  await expect(firstPage.getByText(/Письмо отправлено/)).toBeVisible()
+
+  const recoveryMessage = await waitForMail(request, mailpitURL, learnerEmail, recoverySubject)
+  const recoveryURL = await mailURL(request, mailpitURL, recoveryMessage)
+  await firstPage.goto(recoveryURL.toString())
+  await expect(firstPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
+  await firstPage.getByRole('button', { name: new RegExp(courseTitle) }).click()
+  await expect(firstPage.getByRole('heading', { name: courseTitle })).toBeVisible()
+  await expect(firstPage.getByText(`E2E content ${unique}`, { exact: true })).toBeVisible()
 
   await first.close()
   await second.close()

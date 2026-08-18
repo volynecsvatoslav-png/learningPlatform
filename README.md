@@ -1,6 +1,6 @@
 # Learning Platform
 
-Лёгкая многовендорная обучающая платформа. Реализованы итерации 1.1–1.3: platform backoffice, отдельный vendor cabinet, выдача доступов без оплаты, learner cabinet с одноустройственной серверной сессией, публикации и приватные медиа в MinIO.
+Лёгкая многовендорная обучающая платформа. Реализованы итерации 1.1–1.3: platform backoffice, отдельный vendor cabinet, выдача доступов без оплаты, learner cabinet с привязкой доступа к одному устройству (перенос и восстановление), публикации и приватные медиа в MinIO.
 
 ## Требования
 
@@ -64,11 +64,12 @@ DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,https://example-tunnel.example
 ## Кабинет ученика
 
 1. После выдачи доступа письмо появляется в Mailpit: <http://localhost:8025>. Ссылка имеет не менее 256 бит случайности; в БД хранится только HMAC-хеш.
-2. Откройте персональную ссылку `/app/#access=<token>`, подтвердите вход и просматривайте только выданный опубликованный snapshot курса. Fragment удаляется до первого API-запроса и не попадает в серверные access logs.
+2. Откройте персональную ссылку `/app/#access=<token>`. Приложение создаёт на устройстве ECDSA P-256 ключ (IndexedDB `lms-device`), подписывает challenge и активирует устройство. Fragment удаляется до первого API-запроса и не попадает в серверные access logs.
 3. Markdown, image, audio и video открываются через learner-scoped URL с `Cache-Control: private, no-store` и `Accept-Ranges: bytes`. В proxy mode URL остаётся same-origin; в presigned mode используется короткий signed URL. `object_key` в frontend не передаётся.
 4. Нажмите «Отметить урок завершённым». Прогресс сохраняется на сервере.
-5. Откройте ту же ссылку во втором browser context. Первая сессия при следующем API-запросе получает `SESSION_REVOKED` и показывает «Сессия открыта на другом устройстве»; второй context продолжает работать.
-6. Learner-сессия живёт `LEARNER_SESSION_AGE` (по умолчанию 30 дней); vendor/backoffice-сессия сохраняет общий восьмичасовой `SESSION_COOKIE_AGE`.
+5. Откройте ту же ссылку во втором browser context. Появится запрос «Перенести вход на это устройство»; после подтверждения `generation` доступа увеличивается, старое устройство получает `SESSION_REPLACED`, показывает «Сессия завершена» и выходит.
+6. Приложение держит доступ на устройстве: heartbeat каждые 10 секунд, после удаления/замены приложения ссылка «Восстановить доступ» отправляет на почту `/app/#recovery=<token>`; восстановление подписывается тем же device key, ротирует доступ и активирует устройство заново.
+7. Learner-сессия живёт `LEARNER_SESSION_AGE` (по умолчанию 30 дней); vendor/backoffice-сессия сохраняет общий восьмичасовой `SESSION_COOKIE_AGE`.
 
 ## Курсы и медиа
 
@@ -103,15 +104,18 @@ docker compose run --rm api sh -c "ruff check . && ruff format --check . && mypy
 docker compose run --rm frontend sh -c "npm run lint && npm run typecheck && npm run test && npm run build"
 ```
 
-E2E полностью создаёт курс и доступ через vendor cabinet. Запускайте его на чистых volumes;
-bootstrap-команда намеренно откажется работать без `DEBUG`, явного флага или на базе с другими
-данными:
+E2E полностью создаёт курс и доступ через vendor cabinet и проверяет активацию устройства,
+перенос доступа, завершение сессии и восстановление по email-ссылке. Второй конфиг
+(`npm run test:e2e:pwa`) гоняет офлайн-сценарии против production-сборки приложения.
+Запускайте на чистых volumes; bootstrap-команда намеренно откажется работать без `DEBUG`,
+явного флага или на базе с другими данными:
 
 ```powershell
 docker compose down --volumes --remove-orphans
 docker compose up --build --detach --wait
 docker compose exec -e E2E_BOOTSTRAP_ENABLED=true -e E2E_OWNER_EMAIL=owner.e2e@example.com -e E2E_OWNER_PASSWORD="unusual e2e password 48371" -e E2E_VENDOR_NAME="E2E Vendor" -e E2E_VENDOR_SLUG=e2e-vendor api python manage.py bootstrap_e2e_owner
 docker run --rm -it --network host -v "${PWD}:/work" -w /work -e E2E_OWNER_EMAIL=owner.e2e@example.com -e E2E_OWNER_PASSWORD="unusual e2e password 48371" -e E2E_VENDOR_NAME="E2E Vendor" -e E2E_BASE_URL=http://localhost:5173 -e E2E_MAILPIT_URL=http://localhost:8025 mcr.microsoft.com/playwright:v1.55.0-noble sh -lc "npm ci && npx --no-install playwright test"
+docker run --rm -it --network host -v "${PWD}:/work" -w /work mcr.microsoft.com/playwright:v1.55.0-noble sh -lc "npm ci && npx --no-install playwright test --config=playwright.pwa.config.ts"
 ```
 
 ## Ограничения
@@ -119,7 +123,7 @@ docker run --rm -it --network host -v "${PWD}:/work" -w /work -e E2E_OWNER_EMAIL
 - Офлайн-пакеты работают только внутри установленной PWA: AES-GCM chunks хранятся в OPFS/IndexedDB и требуют действующую семидневную offline license. Это не абсолютная DRM-защита.
 - После первого открытия `/app/` обновите страницу один раз, чтобы Service Worker начал контролировать приложение. Интерфейс покажет «Офлайн-функции готовы» после активации.
 - В локальном Docker Service Worker включён через `VITE_ENABLE_SERVICE_WORKER=true`; для production используется стандартный `import.meta.env.PROD`.
-- Learner session использует серверную Django session cookie; `device_id`, User-Agent и IP не используются как фактор блокировки.
+- Learner session использует серверную Django session cookie; доступ привязан к устройству: вторая активация по той же ссылке требует подтверждения переноса и завершает сессию первого устройства (`SESSION_REPLACED`). `device_id`, User-Agent и IP не используются как фактор блокировки.
 - E2E bootstrap доступен только при `DEBUG=true` и `E2E_BOOTSTRAP_ENABLED=true`; используйте его только на одноразовой чистой базе.
 - Rate limits, полный CSP/CORS hardening, production deployment и MFA относятся к итерации 1.5. MFA обязательно перед реальными продажами.
 - Локальные примеры секретов нельзя использовать в production.

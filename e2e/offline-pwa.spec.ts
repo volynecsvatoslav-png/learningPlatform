@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import licenseFixture from '../apps/api/learner/tests/fixtures/offline_license.json'
 
 const video = readFileSync(resolve('e2e/fixtures/offline-test.mp4'))
@@ -19,7 +19,55 @@ const snapshot = {
   }] }],
 }
 
+async function readStoredState(page: Page): Promise<{ counts: number[]; opfsEntries: number }> {
+  return page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('learning-platform-offline', 1)
+      request.onsuccess = () => { resolve(request.result) }
+      request.onerror = () => { reject(request.error) }
+    })
+    const counts = await Promise.all(['packages', 'keys', 'chunks'].map((name) => new Promise<number>((resolve, reject) => {
+      const request = db.transaction(name).objectStore(name).count()
+      request.onsuccess = () => { resolve(request.result) }
+      request.onerror = () => { reject(request.error) }
+    })))
+    db.close()
+    const root = await navigator.storage.getDirectory()
+    let opfsEntries = 0
+    try {
+      const directory = await root.getDirectoryHandle('learning-platform-offline')
+      for await (const _entry of directory.values()) opfsEntries += 1
+    } catch {
+      opfsEntries = 0
+    }
+    return { counts, opfsEntries }
+  })
+}
+
 test('downloads, plays, expires and deletes an encrypted PWA course', async ({ context, page }) => {
+  await context.addInitScript(async () => {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    const privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey)
+    const privateKey = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'])
+    const publicKeyJwk = await crypto.subtle.exportKey('jwk', pair.publicKey)
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('lms-device', 1)
+      request.onupgradeneeded = () => { request.result.createObjectStore('credentials', { keyPath: 'id' }) }
+      request.onsuccess = () => { resolve(request.result) }
+      request.onerror = () => { reject(request.error) }
+    })
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction('credentials', 'readwrite')
+      transaction.objectStore('credentials').put({
+        id: 'main',
+        installation_id: 'device-1',
+        public_key_jwk: publicKeyJwk,
+        private_key: privateKey,
+      })
+      transaction.oncomplete = () => { resolve() }
+    })
+    db.close()
+  })
   await context.route('**/api/v1/learner/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -76,6 +124,9 @@ test('downloads, plays, expires and deletes an encrypted PWA course', async ({ c
       return
     }
     await route.fulfill({ status: 404, json: { code: 'NOT_FOUND' } })
+  })
+  await context.route('**/api/v1/auth/heartbeat', async (route) => {
+    await route.fulfill({ json: { generation: 1, expires_at: null } })
   })
   await context.route('**/api/online-video', async (route) => {
     await route.fulfill({ body: video, headers: { 'Content-Type': 'video/mp4' } })
@@ -141,29 +192,7 @@ test('downloads, plays, expires and deletes an encrypted PWA course', async ({ c
   expect(expiredStatus).toBe(403)
 
   await page.getByRole('button', { name: 'Удалить с устройства' }).click()
-  const readStorageState = () => page.evaluate(async () => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('learning-platform-offline', 1)
-      request.onsuccess = () => { resolve(request.result) }
-      request.onerror = () => { reject(request.error) }
-    })
-    const counts = await Promise.all(['packages', 'keys', 'chunks'].map((name) => new Promise<number>((resolve, reject) => {
-      const request = db.transaction(name).objectStore(name).count()
-      request.onsuccess = () => { resolve(request.result) }
-      request.onerror = () => { reject(request.error) }
-    })))
-    db.close()
-    const root = await navigator.storage.getDirectory()
-    let opfsEntries = 0
-    try {
-      const directory = await root.getDirectoryHandle('learning-platform-offline')
-      for await (const _entry of directory.values()) opfsEntries += 1
-    } catch {
-      opfsEntries = 0
-    }
-    return { counts, opfsEntries }
-  })
-  await expect.poll(readStorageState).toEqual({ counts: [0, 0, 0], opfsEntries: 0 })
+  await expect.poll(() => readStoredState(page)).toEqual({ counts: [0, 0, 0], opfsEntries: 0 })
 })
 
 test('purges legacy auth entries and never caches access URLs', async ({ context, page }) => {
@@ -178,6 +207,9 @@ test('purges legacy auth entries and never caches access URLs', async ({ context
   }, legacySecret)
   await page.close()
 
+  await context.route('**/api/v1/auth/access/**', async (route) => {
+    await route.fulfill({ status: 401, json: { code: 'INVALID_ACCESS_LINK' } })
+  })
   const freshPage = await context.newPage()
   await freshPage.goto('/app/')
   await freshPage.evaluate(async () => { await navigator.serviceWorker.ready })
@@ -190,7 +222,8 @@ test('purges legacy auth entries and never caches access URLs', async ({ context
 
   const currentSecret = 'current-secret-that-must-not-be-cached'
   await freshPage.goto(`/app/access/${currentSecret}`)
-  await expect(freshPage.getByRole('heading', { name: 'Персональный доступ' })).toBeVisible()
+  await expect.poll(() => freshPage.evaluate(() => new URL(window.location.href).pathname)).toBe('/app/')
+  await expect(freshPage.getByRole('heading', { name: 'Не получилось войти' })).toBeVisible()
   const cachedUrls = await freshPage.evaluate(async () => {
     const names = await caches.keys()
     return (await Promise.all(names.map(async (name) => (await caches.open(name)).keys()))).flat().map((request) => request.url)
