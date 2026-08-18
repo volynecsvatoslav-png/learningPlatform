@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from config.logging import build_logging_config
 from config.offline_keys import validate_offline_license_keys
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -55,6 +56,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "config.cors.CorsAllowlistMiddleware",
+    "config.security.SecurityHeadersMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -145,6 +148,11 @@ CSRF_TRUSTED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+CORS_ALLOWED_ORIGINS = tuple(
+    origin.strip()
+    for origin in os.getenv("DJANGO_CORS_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+)
 
 LANGUAGE_CODE = "ru-ru"
 TIME_ZONE = "UTC"
@@ -167,6 +175,9 @@ SESSION_COOKIE_PATH = "/"
 SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 8)))
 LEARNER_SESSION_AGE = int(os.getenv("LEARNER_SESSION_AGE", str(60 * 60 * 24 * 30)))
 CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
+CSRF_COOKIE_NAME = "__Host-csrftoken" if SESSION_COOKIE_SECURE else "csrftoken"
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_PATH = "/"
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
@@ -189,18 +200,15 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
 }
 
-VENDOR_AUTH_RATE_LIMIT = int(os.getenv("VENDOR_AUTH_RATE_LIMIT", "8"))
-VENDOR_AUTH_RATE_WINDOW_SECONDS = int(os.getenv("VENDOR_AUTH_RATE_WINDOW_SECONDS", "300"))
+LOGGING = build_logging_config()
+
+VENDOR_AUTH_RATE_LIMIT = int(os.getenv("VENDOR_AUTH_RATE_LIMIT", "10"))
+VENDOR_AUTH_RATE_WINDOW_SECONDS = int(os.getenv("VENDOR_AUTH_RATE_WINDOW_SECONDS", "900"))
 TRUSTED_PROXY_CIDRS = tuple(
     value.strip()
     for value in os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128").split(",")
     if value.strip()
 )
-PWA_TRANSFER_PEPPER = os.getenv("PWA_TRANSFER_PEPPER") or SECRET_KEY
-PWA_TRANSFER_TTL_SECONDS = int(os.getenv("PWA_TRANSFER_TTL_SECONDS", "600"))
-PWA_TRANSFER_MAX_ATTEMPTS = int(os.getenv("PWA_TRANSFER_MAX_ATTEMPTS", "5"))
-PWA_TRANSFER_RATE_LIMIT = int(os.getenv("PWA_TRANSFER_RATE_LIMIT", "12"))
-PWA_TRANSFER_RATE_WINDOW_SECONDS = int(os.getenv("PWA_TRANSFER_RATE_WINDOW_SECONDS", "300"))
 ACCESS_TOKEN_PEPPER = os.getenv("ACCESS_TOKEN_PEPPER") or (SECRET_KEY + ":access-token")
 SESSION_TOKEN_PEPPER = os.getenv("SESSION_TOKEN_PEPPER") or (SECRET_KEY + ":session-token")
 if len(ACCESS_TOKEN_PEPPER.encode("utf-8")) < 32 or len(SESSION_TOKEN_PEPPER.encode("utf-8")) < 32:
@@ -216,6 +224,8 @@ ACCESS_AUTH_RATE_LIMIT = int(os.getenv("ACCESS_AUTH_RATE_LIMIT", "20"))
 ACCESS_AUTH_RATE_WINDOW_SECONDS = int(os.getenv("ACCESS_AUTH_RATE_WINDOW_SECONDS", "60"))
 HEARTBEAT_RATE_LIMIT = int(os.getenv("HEARTBEAT_RATE_LIMIT", "1"))
 HEARTBEAT_RATE_WINDOW_SECONDS = int(os.getenv("HEARTBEAT_RATE_WINDOW_SECONDS", "5"))
+MEDIA_URL_RATE_LIMIT = int(os.getenv("MEDIA_URL_RATE_LIMIT", "120"))
+MEDIA_URL_RATE_WINDOW_SECONDS = int(os.getenv("MEDIA_URL_RATE_WINDOW_SECONDS", "60"))
 (
     OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64,
     OFFLINE_LICENSE_PUBLIC_JWK,

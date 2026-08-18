@@ -10,13 +10,13 @@ dependencies = [
     "argon2-cffi==25.1.0",
     "boto3==1.43.69",
     "celery==5.5.3",
-    "cryptography==45.0.6",
+    "cryptography==50.0.0",
     "Django==5.2.17",
     "djangorestframework==3.18.0",
     "filetype==1.2.0",
     "gunicorn==23.0.0",
     "psycopg[binary]==3.2.10",
-    "PyJWT==2.10.1",
+    "PyJWT==2.13.0",
     "redis==6.4.0",
     "whitenoise==6.9.0",
 ]
@@ -27,7 +27,7 @@ dev = [
     "djangorestframework-stubs==3.16.9",
     "factory-boy==3.3.3",
     "mypy==1.17.1",
-    "pytest==8.4.1",
+    "pytest==9.0.3",
     "pytest-django==4.11.1",
     "ruff==0.12.8",
 ]
@@ -38,7 +38,7 @@ py-modules = []
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings_test"
 python_files = ["test_*.py"]
-testpaths = ["accounts/tests", "vendors/tests", "learning/tests", "media_assets/tests", "learner/tests", "vendor_api/tests"]
+testpaths = ["accounts/tests", "config/tests", "vendors/tests", "learning/tests", "media_assets/tests", "learner/tests", "vendor_api/tests"]
 addopts = "--strict-config --strict-markers"
 
 [tool.ruff]

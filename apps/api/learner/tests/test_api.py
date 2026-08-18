@@ -272,6 +272,49 @@ def test_heartbeat_rate_limited(client: Client, settings) -> None:  # type: igno
     assert client.post("/api/v1/auth/heartbeat").status_code == 429
 
 
+def test_media_url_rate_limited_per_session(client: Client, settings) -> None:  # type: ignore[no-untyped-def]
+    cache.clear()
+    settings.MEDIA_URL_RATE_LIMIT = 1
+    settings.MEDIA_URL_RATE_WINDOW_SECONDS = 60
+    learner = User.objects.create_user("learner@example.com")
+    creator = User.objects.create_user("creator@example.com")
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    course = Course.objects.create(vendor=vendor, title="Published", slug="published")
+    module = Module.objects.create(course=course, title="Module", position=1)
+    lesson = Lesson.objects.create(module=module, title="Lesson", position=1, is_published=True)
+    asset = MediaAsset.objects.create(
+        vendor=vendor,
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        object_key="cover.png",
+        original_name="cover.png",
+        content_type="image/png",
+        size_bytes=4,
+        sha256="0" * 64,
+        created_by=creator,
+    )
+    ContentUnit.objects.create(
+        lesson=lesson,
+        type=ContentUnit.Type.IMAGE,
+        position=1,
+        media_asset=asset,
+    )
+    course.status = Course.Status.PUBLISHED
+    publish_course(course)
+    token = secrets.token_urlsafe(32)
+    Enrollment.objects.create(user=learner, vendor=vendor, course=course)
+    AccessPass.objects.create(
+        user=learner,
+        vendor=vendor,
+        token_hash=hash_access_token(token),
+        token_prefix=token[:12],
+    )
+    activate(client, token)
+    path = f"/api/v1/learner/courses/{course.id}/media/{asset.id}/stream-url"
+    assert client.get(path).status_code == 200
+    assert client.get(path).status_code == 429
+
+
 def test_revoked_enrollment_blocks_course(client: Client) -> None:
     _, course, _, token = make_access()
     activate(client, token)

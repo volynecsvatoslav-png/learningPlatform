@@ -2,10 +2,12 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.models import AnonymousUser
 from django.db.models import QuerySet
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponse
+from django.shortcuts import render
 
 from accounts.forms import BackofficeUserChangeForm, BackofficeUserCreationForm
 from accounts.models import User
+from accounts.rate_limit import auth_rate_limited
 
 
 class BackofficeAdminSite(admin.AdminSite):
@@ -20,6 +22,29 @@ class BackofficeAdminSite(admin.AdminSite):
         if user.is_superuser:
             return True
         return False
+
+    def login(
+        self, request: HttpRequest, extra_context: dict[str, object] | None = None
+    ) -> HttpResponse:
+        if request.method == "POST":
+            email = request.POST.get("username", "").strip()
+            if email and auth_rate_limited(request, "admin-login", email):
+                from django.contrib.admin.forms import AdminAuthenticationForm
+
+                form = (self.login_form or AdminAuthenticationForm)(
+                    request=request, data=request.POST
+                )
+                form.add_error(None, "Слишком много попыток входа. Попробуйте позже.")
+                context: dict[str, object] = {
+                    "title": "Вход в бэк-офис",
+                    "app_path": request.get_full_path(),
+                    "username": email,
+                    "form": form,
+                }
+                if extra_context is not None:
+                    context.update(extra_context)
+                return render(request, self.login_template or "admin/login.html", context)
+        return super().login(request, extra_context)
 
 
 backoffice_site = BackofficeAdminSite(name="backoffice")

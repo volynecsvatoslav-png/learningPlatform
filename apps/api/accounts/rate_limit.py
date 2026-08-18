@@ -1,6 +1,5 @@
 import hashlib
 import ipaddress
-import uuid
 
 from django.conf import settings
 from django.core.cache import cache
@@ -64,21 +63,6 @@ def auth_rate_limited(request: HttpRequest, bucket: str, email: str) -> bool:
     )
 
 
-def pwa_transfer_rate_limited(request: HttpRequest, transfer_id: uuid.UUID | None) -> bool:
-    identity = (
-        f"transfer:{transfer_id}"
-        if transfer_id is not None
-        else f"invalid:{trusted_client_ip(request)}"
-    )
-    return _rate_limited(
-        prefix="pwa-transfer",
-        bucket="consume",
-        identity=identity,
-        limit=settings.PWA_TRANSFER_RATE_LIMIT,
-        window_seconds=settings.PWA_TRANSFER_RATE_WINDOW_SECONDS,
-    )
-
-
 def learner_auth_rate_limited(request: HttpRequest, bucket: str) -> bool:
     return _rate_limited(
         prefix="learner-auth",
@@ -114,4 +98,14 @@ def heartbeat_rate_limited(request: HttpRequest, session_key: str) -> bool:
         identity=f"session:{hashlib.sha256(session_key.encode()).hexdigest()}",
         limit=settings.HEARTBEAT_RATE_LIMIT,
         window_seconds=settings.HEARTBEAT_RATE_WINDOW_SECONDS,
+    )
+
+
+def media_url_rate_limited(request: HttpRequest, session_key: str) -> bool:
+    return _rate_limited(
+        prefix="learner-media",
+        bucket="session",
+        identity=f"session:{hashlib.sha256(session_key.encode()).hexdigest()}",
+        limit=settings.MEDIA_URL_RATE_LIMIT,
+        window_seconds=settings.MEDIA_URL_RATE_WINDOW_SECONDS,
     )

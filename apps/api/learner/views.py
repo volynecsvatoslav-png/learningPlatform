@@ -4,7 +4,7 @@ from typing import Any, cast
 
 from django.conf import settings
 from django.contrib.auth import logout
-from django.http import Http404, StreamingHttpResponse
+from django.http import Http404, HttpResponseBase
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -20,6 +20,7 @@ from rest_framework.views import APIView
 from accounts.rate_limit import (
     heartbeat_rate_limited,
     learner_auth_rate_limited,
+    media_url_rate_limited,
     recovery_request_rate_limited,
 )
 from learner.models import (
@@ -523,8 +524,10 @@ class LearnerOfflineMediaContentView(LearnerAPIView):
         course_id: uuid.UUID,
         revision_id: uuid.UUID,
         asset_id: uuid.UUID,
-    ) -> StreamingHttpResponse:
+    ) -> HttpResponseBase:
         context = _learner_context(request)
+        if media_url_rate_limited(request._request, context.session.session_key):
+            return _rate_limited(settings.MEDIA_URL_RATE_WINDOW_SECONDS)
         enrollment = _active_enrollment(context, course_id)
         revision = _revision_for_course(enrollment.course, revision_id)
         snapshot = cast(dict[str, Any], revision.snapshot_json)
@@ -588,6 +591,8 @@ class LearnerProgressView(LearnerAPIView):
 class LearnerStreamURLView(LearnerAPIView):
     def get(self, request: Request, course_id: uuid.UUID, asset_id: uuid.UUID) -> Response:
         context = _learner_context(request)
+        if media_url_rate_limited(request._request, context.session.session_key):
+            return _rate_limited(settings.MEDIA_URL_RATE_WINDOW_SECONDS)
         enrollment = _active_enrollment(context, course_id)
         snapshot = _snapshot_course(enrollment)
         asset_ids = {snapshot.get("cover_asset_id")}
@@ -614,10 +619,10 @@ class LearnerStreamURLView(LearnerAPIView):
 
 
 class LearnerMediaContentView(LearnerAPIView):
-    def get(
-        self, request: Request, course_id: uuid.UUID, asset_id: uuid.UUID
-    ) -> StreamingHttpResponse:
+    def get(self, request: Request, course_id: uuid.UUID, asset_id: uuid.UUID) -> HttpResponseBase:
         context = _learner_context(request)
+        if media_url_rate_limited(request._request, context.session.session_key):
+            return _rate_limited(settings.MEDIA_URL_RATE_WINDOW_SECONDS)
         enrollment = _active_enrollment(context, course_id)
         snapshot = _snapshot_course(enrollment)
         asset_ids = {snapshot.get("cover_asset_id")}
@@ -635,9 +640,9 @@ class LearnerMediaContentView(LearnerAPIView):
         return serve_asset_content(request, asset)
 
 
-def _rate_limited() -> Response:
+def _rate_limited(window_seconds: int | None = None) -> Response:
     response = Response({"code": "RATE_LIMITED"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-    response["Retry-After"] = str(settings.ACCESS_AUTH_RATE_WINDOW_SECONDS)
+    response["Retry-After"] = str(window_seconds or settings.ACCESS_AUTH_RATE_WINDOW_SECONDS)
     return _private_no_store(response)
 
 

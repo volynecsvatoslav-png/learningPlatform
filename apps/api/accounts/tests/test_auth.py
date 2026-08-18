@@ -56,3 +56,22 @@ def test_invalid_backoffice_login_returns_form_without_server_error(client: Clie
 
     assert response.status_code == 200
     assert not response.wsgi_request.user.is_authenticated
+
+
+def test_backoffice_login_is_rate_limited(client: Client, settings) -> None:  # type: ignore[no-untyped-def]
+    settings.VENDOR_AUTH_RATE_LIMIT = 1
+    make_vendor_admin()
+
+    first = client.post(
+        "/backoffice/login/", {"username": "owner@example.com", "password": "wrong"}
+    )
+    assert first.status_code == 200
+    assert "sessionid" not in client.cookies
+
+    second = client.post(
+        "/backoffice/login/", {"username": "owner@example.com", "password": PASSWORD}
+    )
+
+    assert second.status_code == 200
+    assert "sessionid" not in client.cookies
+    assert "Слишком много попыток входа" in second.content.decode("utf-8")
