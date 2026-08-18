@@ -52,6 +52,10 @@ jobs:
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py migrate --noinput
       - run: pytest
+      - name: Dependency audit
+        run: |
+          pip install pip-audit
+          pip-audit --requirement requirements.lock
 
   frontend:
     runs-on: ubuntu-latest
@@ -70,3 +74,39 @@ jobs:
       - run: npm run typecheck
       - run: npm run test
       - run: npm run build
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Start the stack
+        run: docker compose up --build --detach --wait
+        timeout-minutes: 20
+      - name: Bootstrap E2E owner
+        run: |
+          docker compose exec -T \
+            -e E2E_BOOTSTRAP_ENABLED=true \
+            -e E2E_OWNER_EMAIL=owner.e2e@example.com \
+            -e E2E_OWNER_PASSWORD="unusual e2e password 48371" \
+            -e E2E_VENDOR_NAME="E2E Vendor" \
+            -e E2E_VENDOR_SLUG=e2e-vendor \
+            api python manage.py bootstrap_e2e_owner
+      - name: Vendor and learner E2E
+        run: npm run test:e2e
+        env:
+          E2E_OWNER_EMAIL: owner.e2e@example.com
+          E2E_OWNER_PASSWORD: "unusual e2e password 48371"
+          E2E_VENDOR_NAME: E2E Vendor
+          E2E_BASE_URL: http://localhost:5173
+          E2E_MAILPIT_URL: http://localhost:8025
+      - name: Offline PWA E2E
+        run: npm run test:e2e:pwa

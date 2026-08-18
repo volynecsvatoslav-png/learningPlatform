@@ -15,7 +15,10 @@ export default defineConfig({
   },
   webServer: {
     command: 'npm --prefix apps/web run build && npm --prefix apps/web run preview',
-    env: { VITE_OFFLINE_LICENSE_PUBLIC_JWK: JSON.stringify(offlineFixture.publicJwk) },
+    env: {
+      VITE_OFFLINE_LICENSE_PUBLIC_JWK: JSON.stringify(offlineFixture.publicJwk),
+      VITE_API_PROXY_TARGET: 'http://127.0.0.1:8000',
+    },
     url: 'http://127.0.0.1:4173/app/',
     reuseExistingServer: true,
     timeout: 120_000,

@@ -180,6 +180,31 @@ test('device activation transfers access with confirmation and recovers it', asy
   await expect(secondPage.getByText(`E2E content ${unique}`, { exact: true })).toBeVisible()
 
   expect(await sessionStatus(firstPage)).toEqual({ status: 401, code: 'SESSION_REPLACED' })
+
+  // Criterion 17: clearing site data must turn the next activation into a transfer.
+  await second.clearCookies()
+  await secondPage.evaluate(async () => {
+    const databases = await indexedDB.databases()
+    await Promise.all(
+      databases.map((db) => new Promise<void>((resolve) => {
+        if (!db.name) {
+          resolve()
+          return
+        }
+        const request = indexedDB.deleteDatabase(db.name)
+        request.onsuccess = () => resolve()
+        request.onerror = () => resolve()
+        request.onblocked = () => resolve()
+      })),
+    )
+  })
+  await secondPage.reload()
+  await expect(secondPage.getByRole('heading', { name: 'Вход в кабинет ученика' })).toBeVisible()
+  await secondPage.goto(accessURL.toString())
+  await expect(secondPage.getByRole('heading', { name: 'Перенос входа' })).toBeVisible()
+  await secondPage.getByRole('button', { name: 'Перенести вход на это устройство' }).click()
+  await expect(secondPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
+
   await firstPage.reload()
   await expect(firstPage.getByRole('heading', { name: 'Сессия завершена' })).toBeVisible()
   await firstPage.getByRole('button', { name: 'Выйти' }).click()
