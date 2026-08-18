@@ -1,6 +1,6 @@
 # Learning Platform
 
-Лёгкая многовендорная обучающая платформа. Реализованы итерации 1.1–1.3: platform backoffice, отдельный vendor cabinet, выдача доступов без оплаты, learner cabinet с привязкой доступа к одному устройству (перенос и восстановление), публикации и приватные медиа в MinIO.
+Лёгкая многовендорная обучающая платформа. Реализованы итерации 1.1–1.5: platform backoffice, отдельный vendor cabinet, выдача доступов без оплаты, learner cabinet с привязкой доступа к одному устройству (перенос и восстановление), зашифрованные offline-пакеты для установленной PWA, публикации и приватные медиа в MinIO, hardening (CSP/CSRF/CORS/rate limits, редактирование секретов из логов), полный E2E suite, backup/restore runbook и deployment guide.
 
 ## Требования
 
@@ -104,8 +104,11 @@ docker compose run --rm api sh -c "ruff check . && ruff format --check . && mypy
 docker compose run --rm frontend sh -c "npm run lint && npm run typecheck && npm run test && npm run build"
 ```
 
+Dependency audit: `pip-audit --requirement requirements.lock` и `npm audit --audit-level=high` должны быть чистыми; оба запускаются в CI вместе с backend/frontend job'ами.
+
 E2E полностью создаёт курс и доступ через vendor cabinet и проверяет активацию устройства,
-перенос доступа, завершение сессии и восстановление по email-ссылке. Второй конфиг
+перенос доступа, завершение сессии, восстановление по email-ссылке и поведение после полной
+очистки данных сайта (повторная активация = перенос). Второй конфиг
 (`npm run test:e2e:pwa`) гоняет офлайн-сценарии против production-сборки приложения.
 Запускайте на чистых volumes; bootstrap-команда намеренно откажется работать без `DEBUG`,
 явного флага или на базе с другими данными:
@@ -118,12 +121,41 @@ docker run --rm -it --network host -v "${PWD}:/work" -w /work -e E2E_OWNER_EMAIL
 docker run --rm -it --network host -v "${PWD}:/work" -w /work mcr.microsoft.com/playwright:v1.55.0-noble sh -lc "npm ci && npx --no-install playwright test --config=playwright.pwa.config.ts"
 ```
 
+## Безопасность
+
+- **CSP**: страницы собираются с `script-src 'self' 'wasm-unsafe-eval'` (hash-wasm) и без `unsafe-inline`; API отдаёт `default-src 'none'; frame-ancestors 'none'`, backoffice — `frame-ancestors 'none'`. Заголовки выставляются Vite (dev/preview) и Django (API).
+- **Cookies**: `__Host-sessionid`/`__Host-csrftoken` при `DJANGO_SECURE_COOKIES=true`, `HttpOnly`, `SameSite=Lax`.
+- **CORS**: по умолчанию заголовки не отдаются вовсе; включаются только для origins из `DJANGO_CORS_ALLOWED_ORIGINS`. Preflight от чужих origins — 403.
+- **Secrets в логах**: gunicorn access-формат без Referer/User-Agent; `RedactSecretsFilter` заменяет `[REDACTED]` в сообщениях S3-подписей, Bearer-токенов, access/recovery/reset-токенов и паролей. Токены доступа живут только во fragment URL и не попадают в access logs.
+- **Referrer**: приложение переключается на `no-referrer`, пока токен виден в URL; глобально `strict-origin-when-cross-origin`.
+- **Rate limits** (Redis-бэкенд, считаются на IP и/или email):
+
+| Эндпоинт | Лимит | Период |
+| --- | --- | --- |
+| Vendor login / password-reset | 10 на IP+email | 15 мин |
+| Recovery request | 5 на IP; 3 на hash(email) | 1 час |
+| Access inspect/exchange | 20 на IP | 1 мин |
+| Heartbeat | 1 | 5 сек |
+| Медиа stream-url/content | 120 на активную сессию | 1 мин |
+
+Все значения переопределяются через `*_RATE_LIMIT`/`*_RATE_WINDOW_SECONDS` переменные (см. `compose.yaml`).
+
+- **Остальное**: HSTS (1 год, включая subdomains) при `DJANGO_DEBUG=false`, nosniff, `X-Frame-Options: DENY`, CSRF-token обязателен для всех POST, ORM без raw SQL, UUID primary keys, tenant-фильтры на сервере, offline-лицензии подписаны EC P-256.
+
+### Документация
+
+- `docs/operations/backup-restore.md` — pg_dump/MinIO mirror и проверяемый restore drill;
+- `docs/deployment.md` — production compose + nginx (TLS, HSTS, проксирование медиа и API);
+- `docs/manual-testing-android-ios.md` — ручной чек-лист PWA на реальных устройствах;
+- `docs/adr/0001-single-device-learner-access.md` — решение о привязке доступа к устройству.
+
 ## Ограничения
 
-- Офлайн-пакеты работают только внутри установленной PWA: AES-GCM chunks хранятся в OPFS/IndexedDB и требуют действующую семидневную offline license. Это не абсолютная DRM-защита.
+- Офлайн-пакеты работают только внутри установленной PWA: AES-GCM chunks хранятся в OPFS/IndexedDB и требуют действующую offline license (`OFFLINE_LICENSE_TTL_HOURS`, по умолчанию 24 часа; без сети через сутки курсы требуют подключения). Это не абсолютная DRM-защита.
 - После первого открытия `/app/` обновите страницу один раз, чтобы Service Worker начал контролировать приложение. Интерфейс покажет «Офлайн-функции готовы» после активации.
 - В локальном Docker Service Worker включён через `VITE_ENABLE_SERVICE_WORKER=true`; для production используется стандартный `import.meta.env.PROD`.
-- Learner session использует серверную Django session cookie; доступ привязан к устройству: вторая активация по той же ссылке требует подтверждения переноса и завершает сессию первого устройства (`SESSION_REPLACED`). `device_id`, User-Agent и IP не используются как фактор блокировки.
+- Learner session использует серверную Django session cookie; доступ привязан к устройству: вторая активация по той же ссылке требует подтверждения переноса и завершает сессию первого устройства (`SESSION_REPLACED`). `device_id`, User-Agent и IP не используются как фактор блокировки; очистка данных сайта приводит к повторной активации как переносу (критерий 17).
 - E2E bootstrap доступен только при `DEBUG=true` и `E2E_BOOTSTRAP_ENABLED=true`; используйте его только на одноразовой чистой базе.
-- Rate limits, полный CSP/CORS hardening, production deployment и MFA относятся к итерации 1.5. MFA обязательно перед реальными продажами.
+- Rate limits считаются per-instance: при нескольких репликах Django окна пересчитываются каждой нодой независимо.
+- MFA для владельцев относится к итерации 1.6 и обязательна перед реальными продажами.
 - Локальные примеры секретов нельзя использовать в production.
