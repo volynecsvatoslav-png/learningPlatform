@@ -33,6 +33,10 @@ function entranceFromLocation(): EntranceToken | null {
   return null
 }
 
+function noReferrerWhileTokenVisible() {
+  ;(document as Document & { referrerPolicy?: string }).referrerPolicy = 'no-referrer'
+}
+
 function entranceFromPastedLink(value: string): EntranceToken | null {
   try {
     const url = new URL(value.trim())
@@ -310,6 +314,7 @@ export function LearnerPage() {
   useEffect(() => {
     const token = entranceFromLocation()
     if (token) {
+      noReferrerWhileTokenVisible()
       window.history.replaceState({}, '', '/app/')
       setEntrance(token)
     }
@@ -319,6 +324,7 @@ export function LearnerPage() {
     const handleHashChange = () => {
       const token = entranceFromLocation()
       if (token) {
+        noReferrerWhileTokenVisible()
         window.history.replaceState({}, '', '/app/')
         setEntrance(token)
       }

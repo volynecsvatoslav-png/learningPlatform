@@ -8,6 +8,33 @@ const allowedHosts = (process.env.VITE_ALLOWED_HOSTS ?? 'localhost,127.0.0.1')
 const offlineLicensePublicJwk = process.env.VITE_OFFLINE_LICENSE_PUBLIC_JWK
   || '{"kty":"EC","x":"l242GNMQAQSa-GSVtUflOeS6m1kzEOi9oRA88cUx5v8","y":"Rw_iSGOS8Djf5dm5zVJoBwIskMOikApH8pPOp6vh0eo","crv":"P-256"}'
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? 'http://api:8000'
+const mediaSources = (process.env.VITE_CSP_MEDIA_SOURCES ?? 'http://localhost:9000')
+  .split(',')
+  .map((source) => source.trim())
+  .filter(Boolean)
+  .join(' ')
+
+function contentSecurityPolicy(dev: boolean): string {
+  const scriptSrc = dev ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'" : "script-src 'self' 'wasm-unsafe-eval'"
+  const styleSrc = dev ? "style-src 'self' 'unsafe-inline'" : "style-src 'self'"
+  const connectSrc = dev
+    ? `connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173${mediaSources ? ` ${mediaSources}` : ''}`
+    : `connect-src 'self'${mediaSources ? ` ${mediaSources}` : ''}`
+  return [
+    "default-src 'self'",
+    scriptSrc,
+    styleSrc,
+    `img-src 'self' data: blob:${mediaSources ? ` ${mediaSources}` : ''}`,
+    `media-src 'self' blob:${mediaSources ? ` ${mediaSources}` : ''}`,
+    connectSrc,
+    "font-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+  ].join('; ')
+}
 
 export default defineConfig({
   define: {
@@ -19,6 +46,11 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     allowedHosts,
+    headers: {
+      'Content-Security-Policy': contentSecurityPolicy(true),
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+    },
     watch: {
       usePolling: true,
     },
@@ -33,6 +65,11 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 4173,
     strictPort: true,
+    headers: {
+      'Content-Security-Policy': contentSecurityPolicy(false),
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+    },
     proxy: {
       '/api': { target: apiProxyTarget, changeOrigin: true, xfwd: true },
       '/backoffice': { target: apiProxyTarget, changeOrigin: true, xfwd: true },
