@@ -77,3 +77,41 @@ def pwa_transfer_rate_limited(request: HttpRequest, transfer_id: uuid.UUID | Non
         limit=settings.PWA_TRANSFER_RATE_LIMIT,
         window_seconds=settings.PWA_TRANSFER_RATE_WINDOW_SECONDS,
     )
+
+
+def learner_auth_rate_limited(request: HttpRequest, bucket: str) -> bool:
+    return _rate_limited(
+        prefix="learner-auth",
+        bucket=bucket,
+        identity=trusted_client_ip(request),
+        limit=settings.ACCESS_AUTH_RATE_LIMIT,
+        window_seconds=settings.ACCESS_AUTH_RATE_WINDOW_SECONDS,
+    )
+
+
+def recovery_request_rate_limited(request: HttpRequest, email: str) -> tuple[bool, bool]:
+    ip_limited = _rate_limited(
+        prefix="learner-recovery",
+        bucket="request-ip",
+        identity=trusted_client_ip(request),
+        limit=settings.RECOVERY_REQUEST_IP_LIMIT,
+        window_seconds=settings.RECOVERY_REQUEST_RATE_WINDOW_SECONDS,
+    )
+    email_limited = _rate_limited(
+        prefix="learner-recovery",
+        bucket="request-email",
+        identity=hashlib.sha256(email.strip().casefold().encode()).hexdigest(),
+        limit=settings.RECOVERY_REQUEST_EMAIL_LIMIT,
+        window_seconds=settings.RECOVERY_REQUEST_RATE_WINDOW_SECONDS,
+    )
+    return ip_limited, email_limited
+
+
+def heartbeat_rate_limited(request: HttpRequest, session_key: str) -> bool:
+    return _rate_limited(
+        prefix="learner-heartbeat",
+        bucket="session",
+        identity=f"session:{hashlib.sha256(session_key.encode()).hexdigest()}",
+        limit=settings.HEARTBEAT_RATE_LIMIT,
+        window_seconds=settings.HEARTBEAT_RATE_WINDOW_SECONDS,
+    )

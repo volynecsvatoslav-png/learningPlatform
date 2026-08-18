@@ -5,7 +5,10 @@ from accounts.admin import backoffice_site
 from accounts.forms import BackofficePasswordResetForm
 from config.health import health
 from learner.views import (
-    AccessLinkView,
+    AccessExchangeView,
+    AccessInspectView,
+    AuthHeartbeatView,
+    AuthMeView,
     LearnerCourseDetailView,
     LearnerCourseListView,
     LearnerCsrfView,
@@ -15,10 +18,9 @@ from learner.views import (
     LearnerOfflineManifestView,
     LearnerOfflineMediaContentView,
     LearnerProgressView,
-    LearnerSessionView,
     LearnerStreamURLView,
-    PwaSessionTransferConsumeView,
-    PwaSessionTransferView,
+    RecoveryExchangeView,
+    RecoveryRequestView,
 )
 from media_assets.views import (
     MediaStatusView,
@@ -166,20 +168,31 @@ urlpatterns = [
         VendorMediaContentView.as_view(),
         name="vendor-media-content",
     ),
-    path("api/v1/learner/access/<str:token>", AccessLinkView.as_view(), name="learner-access"),
     path("api/v1/learner/csrf", LearnerCsrfView.as_view(), name="learner-csrf"),
-    path("api/v1/learner/session", LearnerSessionView.as_view(), name="learner-session"),
-    path(
-        "api/v1/learner/pwa-transfer",
-        PwaSessionTransferView.as_view(),
-        name="learner-pwa-transfer",
-    ),
-    path(
-        "api/v1/learner/pwa-transfer/consume",
-        PwaSessionTransferConsumeView.as_view(),
-        name="learner-pwa-transfer-consume",
-    ),
     path("api/v1/learner/logout", LearnerLogoutView.as_view(), name="learner-logout"),
+    path(
+        "api/v1/auth/access/inspect",
+        AccessInspectView.as_view(),
+        name="learner-auth-access-inspect",
+    ),
+    path(
+        "api/v1/auth/access/exchange",
+        AccessExchangeView.as_view(),
+        name="learner-auth-access-exchange",
+    ),
+    path("api/v1/auth/me", AuthMeView.as_view(), name="learner-auth-me"),
+    path("api/v1/auth/heartbeat", AuthHeartbeatView.as_view(), name="learner-auth-heartbeat"),
+    path("api/v1/auth/logout", LearnerLogoutView.as_view(), name="learner-auth-logout"),
+    path(
+        "api/v1/auth/recovery/request",
+        RecoveryRequestView.as_view(),
+        name="learner-auth-recovery-request",
+    ),
+    path(
+        "api/v1/auth/recovery/exchange",
+        RecoveryExchangeView.as_view(),
+        name="learner-auth-recovery-exchange",
+    ),
     path("api/v1/learner/courses", LearnerCourseListView.as_view(), name="learner-courses"),
     path(
         "api/v1/learner/courses/<uuid:course_id>",

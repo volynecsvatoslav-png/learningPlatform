@@ -1,4 +1,3 @@
-import secrets
 import uuid
 from typing import Any, cast
 
@@ -25,7 +24,13 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.rate_limit import auth_rate_limited
-from learner.models import AccessLink, Enrollment, LearnerSession, hash_access_token
+from learner.models import AccessPass, Enrollment, LearnerSession
+from learner.services import (
+    InvalidAccessLink,
+    grant_course_access,
+    rotate_access_pass,
+    write_audit,
+)
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import (
     PublicationValidationError,
@@ -89,22 +94,6 @@ class VendorAPIView(APIView):
         except ValueError as error:
             raise Http404 from error
         return VendorContext.resolve(user=cast(User, request.user), vendor_id=parsed, roles=roles)
-
-
-def _send_access_link(enrollment: Enrollment) -> str:
-    token = secrets.token_urlsafe(32)
-    AccessLink.objects.filter(enrollment=enrollment, revoked_at__isnull=True).update(
-        revoked_at=timezone.now()
-    )
-    AccessLink.objects.create(enrollment=enrollment, token_hash=hash_access_token(token))
-    url = f"{settings.PUBLIC_APP_URL}/app/#access={token}"
-    send_mail(
-        subject=f"Доступ к курсу: {enrollment.course.title}",
-        message=f"Откройте ссылку для входа: {url}",
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[enrollment.learner.email],
-    )
-    return url
 
 
 class VendorCsrfView(APIView):
@@ -287,6 +276,15 @@ class VendorCoursePublishView(VendorAPIView):
             revision = publish_course(course, created_by=request.user)
         except PublicationValidationError as error:
             return Response({"code": "PUBLICATION_INVALID", "detail": str(error)}, status=422)
+        write_audit(
+            event_type="publication",
+            vendor=course.vendor,
+            actor=cast(User, request.user),
+            target_type="Course",
+            target_id=course.id,
+            request=request._request,
+            metadata={"revision": revision.revision_number},
+        )
         return Response({"revision": revision.revision_number, "status": course.Status.PUBLISHED})
 
 
@@ -503,7 +501,7 @@ class VendorAccessListView(VendorAPIView):
     def get(self, request: Request) -> Response:
         context = self.context(request, roles=(VendorMember.Role.OWNER,))
         rows = Enrollment.objects.filter(course__vendor=context.vendor).select_related(
-            "course", "learner"
+            "course", "user"
         )
         return Response(EnrollmentSerializer(rows, many=True).data)
 
@@ -516,32 +514,23 @@ class VendorAccessGrantView(VendorAPIView):
         context = self.context(
             request, vendor_id=data["vendor_id"], roles=(VendorMember.Role.OWNER,)
         )
-        courses = list(
-            Course.objects.filter(
-                pk__in=data["course_ids"],
+        try:
+            result = grant_course_access(
                 vendor=context.vendor,
-                status=Course.Status.PUBLISHED,
+                learner_email=data["learner_email"],
+                course_ids=data["course_ids"],
+                granted_by=cast(User, request.user),
+                request=request._request,
             )
+        except InvalidAccessLink:
+            raise Http404 from None
+        return Response(
+            {
+                "enrollments": EnrollmentSerializer(result["enrollments"], many=True).data,
+                "access_link": result["link"],
+            },
+            status=201,
         )
-        if len(courses) != len(set(data["course_ids"])):
-            raise Http404
-        learner, _ = User.objects.get_or_create(
-            email=User.objects.normalize_email_address(data["learner_email"])
-        )
-        result = []
-        for course in courses:
-            enrollment, _ = Enrollment.objects.update_or_create(
-                learner=learner,
-                course=course,
-                defaults={
-                    "status": Enrollment.Status.ACTIVE,
-                    "revoked_at": None,
-                    "granted_by": request.user,
-                },
-            )
-            _send_access_link(enrollment)
-            result.append(enrollment)
-        return Response(EnrollmentSerializer(result, many=True).data, status=201)
 
 
 class VendorAccessRevokeView(VendorAPIView):
@@ -550,8 +539,14 @@ class VendorAccessRevokeView(VendorAPIView):
         enrollment.status = Enrollment.Status.REVOKED
         enrollment.revoked_at = timezone.now()
         enrollment.save(update_fields=("status", "revoked_at"))
-        AccessLink.objects.filter(enrollment=enrollment, revoked_at__isnull=True).update(
-            revoked_at=timezone.now()
+        write_audit(
+            event_type="enrollment_revoke",
+            vendor=enrollment.vendor,
+            actor=cast(User, request.user),
+            target_type="Enrollment",
+            target_id=enrollment.id,
+            request=request._request,
+            metadata={"course_id": str(enrollment.course_id)},
         )
         return Response(EnrollmentSerializer(enrollment).data)
 
@@ -561,8 +556,19 @@ class VendorAccessReissueView(VendorAPIView):
         _, enrollment = _enrollment_for_vendor(request, enrollment_id)
         if enrollment.status != Enrollment.Status.ACTIVE:
             return Response({"code": "ENROLLMENT_REVOKED"}, status=409)
-        _send_access_link(enrollment)
-        return Response(EnrollmentSerializer(enrollment).data)
+        access_pass = AccessPass.objects.filter(
+            vendor=enrollment.vendor,
+            user=enrollment.user,
+            status=AccessPass.Status.ACTIVE,
+        ).first()
+        if access_pass is None:
+            raise Http404
+        access_pass, link = rotate_access_pass(
+            access_pass=access_pass,
+            actor=cast(User, request.user),
+            request=request._request,
+        )
+        return Response({**EnrollmentSerializer(enrollment).data, "access_link": link})
 
 
 class VendorMemberListView(VendorAPIView):

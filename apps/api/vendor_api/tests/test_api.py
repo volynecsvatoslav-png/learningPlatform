@@ -10,7 +10,9 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
 from accounts.models import User
-from learner.models import AccessLink, Enrollment, hash_access_token
+from audit.models import AuditEvent
+from learner.models import AccessPass, Enrollment, hash_access_token
+from learner.tests.helpers import activate
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import publish_course
 from media_assets.models import MediaAsset
@@ -398,7 +400,7 @@ def test_editor_cannot_manage_access(client: Client) -> None:
     assert response.status_code == 400
 
 
-def test_grant_revoke_and_reissue_access_store_only_hash(client: Client) -> None:
+def test_grant_reissue_and_revoke_access_store_only_hash(client: Client) -> None:
     vendor = Vendor.objects.create(name="Alpha", slug="alpha")
     owner = member("owner@example.com", vendor, VendorMember.Role.OWNER)
     published = course(vendor)
@@ -406,7 +408,10 @@ def test_grant_revoke_and_reissue_access_store_only_hash(client: Client) -> None
     published.save(update_fields=("status",))
     client.force_login(owner)
 
-    with patch("vendor_api.views.secrets.token_urlsafe", side_effect=["a" * 43, "b" * 43]):
+    with patch(
+        "learner.services.new_access_token",
+        side_effect=[("a" * 43, "hash-a"), ("b" * 43, "hash-b")],
+    ):
         response = json_post(
             client,
             "/api/v1/vendor/access/grant",
@@ -417,22 +422,30 @@ def test_grant_revoke_and_reissue_access_store_only_hash(client: Client) -> None
             },
         )
         assert response.status_code == 201
-        enrollment_id = response.json()[0]["id"]
-        first = AccessLink.objects.get()
-        assert first.token_hash == hash_access_token("a" * 43)
+        body = response.json()
+        enrollment_id = body["enrollments"][0]["id"]
+        assert body["enrollments"][0]["learner_email"] == "learner@example.com"
+        first = AccessPass.objects.get()
+        assert first.token_hash == "hash-a"
         assert "a" * 43 not in first.token_hash
+        assert body["access_link"].endswith(f"/app/#access={'a' * 43}")
         assert len(mail.outbox) == 1
         assert f"/app/#access={'a' * 43}" in mail.outbox[0].body
         assert "/app/access/" not in mail.outbox[0].body
 
         response = client.post(f"/api/v1/vendor/access/{enrollment_id}/reissue")
         assert response.status_code == 200
-        assert AccessLink.objects.filter(revoked_at__isnull=True).count() == 1
-        assert AccessLink.objects.filter(token_hash=first.token_hash).exists()
+        assert response.json()["access_link"].endswith(f"/app/#access={'b' * 43}")
+        first.refresh_from_db()
+        assert first.token_hash == "hash-b"
+        assert first.rotated_at is not None
+        assert AccessPass.objects.count() == 1
+        assert AuditEvent.objects.filter(event_type="access_pass_rotation").count() == 1
 
     response = client.post(f"/api/v1/vendor/access/{enrollment_id}/revoke")
     assert response.status_code == 200
     assert Enrollment.objects.get(pk=enrollment_id).status == Enrollment.Status.REVOKED
+    assert AuditEvent.objects.filter(event_type="enrollment_revoke").count() == 1
 
 
 def test_existing_user_cannot_be_taken_over_when_adding_member(client: Client) -> None:
@@ -552,15 +565,19 @@ def test_vendor_media_list_is_tenant_scoped_and_hides_storage_keys(client: Clien
 
 def test_learner_session_cannot_authorize_vendor_api(client: Client) -> None:
     vendor = Vendor.objects.create(name="Alpha", slug="alpha")
-    user = member("shared@example.com", vendor, VendorMember.Role.OWNER)
+    user = User.objects.create_user("learner@example.com")
     published = course(vendor)
     published.status = Course.Status.PUBLISHED
     published.save(update_fields=("status",))
-    enrollment = Enrollment.objects.create(learner=user, course=published)
     token = "a" * 43
-    AccessLink.objects.create(enrollment=enrollment, token_hash=hash_access_token(token))
+    Enrollment.objects.create(user=user, vendor=vendor, course=published)
+    AccessPass.objects.create(
+        user=user,
+        vendor=vendor,
+        token_hash=hash_access_token(token),
+        token_prefix=token[:12],
+    )
 
-    response = json_post(client, "/api/v1/learner/session", {"token": token})
-    assert response.status_code == 200
+    activate(client, token)
     assert client.get("/api/v1/learner/courses").status_code == 200
     assert client.get("/api/v1/vendor/me").status_code in {401, 403}

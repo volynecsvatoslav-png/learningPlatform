@@ -1,17 +1,9 @@
-import base64
-import binascii
-import hashlib
-import hmac
 import math
-import secrets
 import uuid
-from datetime import timedelta
 from typing import Any, cast
 
 from django.conf import settings
-from django.contrib.auth import login, logout
-from django.contrib.sessions.models import Session
-from django.db import transaction
+from django.contrib.auth import logout
 from django.http import Http404, StreamingHttpResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -25,21 +17,35 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import User
-from accounts.rate_limit import pwa_transfer_rate_limited
+from accounts.rate_limit import (
+    heartbeat_rate_limited,
+    learner_auth_rate_limited,
+    recovery_request_rate_limited,
+)
 from learner.models import (
-    AccessLink,
+    AccessPass,
     Enrollment,
     LearnerSession,
     LessonProgress,
-    PwaSessionTransfer,
-    hash_access_token,
-    hash_pwa_transfer_code,
 )
 from learner.offline_license import issue_offline_license
 from learner.serializers import (
+    AccessExchangeSerializer,
+    AccessInspectSerializer,
     LearnerProgressSerializer,
-    PwaSessionTransferConsumeSerializer,
+    RecoveryExchangeSerializer,
+)
+from learner.services import (
+    DeviceProofError,
+    InvalidAccessLink,
+    InvalidRecoveryToken,
+    LearnerAuthContext,
+    TransferConfirmationRequired,
+    exchange_access,
+    inspect_access,
+    recover_access,
+    request_recovery,
+    write_audit,
 )
 from learning.models import Course, CourseRevision
 from media_assets.models import MediaAsset
@@ -47,10 +53,20 @@ from media_assets.storage import get_storage
 from media_assets.views import serve_asset_content
 
 
-def _active_enrollment(user: User, course_id: uuid.UUID) -> Enrollment:
+def _learner_context(request: Request) -> LearnerAuthContext:
+    return cast(LearnerAuthContext, request.auth)
+
+
+def _private_no_store(response: Response) -> Response:
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+def _active_enrollment(context: LearnerAuthContext, course_id: uuid.UUID) -> Enrollment:
     enrollment = (
         Enrollment.objects.filter(
-            learner=user,
+            user=context.learner,
+            vendor=context.access_pass.vendor,
             course_id=course_id,
             status=Enrollment.Status.ACTIVE,
             course__status=Course.Status.PUBLISHED,
@@ -63,60 +79,6 @@ def _active_enrollment(user: User, course_id: uuid.UUID) -> Enrollment:
     return enrollment
 
 
-def _learner_user(request: Request) -> User:
-    return cast(User, request.user)
-
-
-def _private_no_store(response: Response) -> Response:
-    response["Cache-Control"] = "private, no-store"
-    return response
-
-
-def _replace_learner_session(request: Request, learner: User) -> LearnerSession:
-    now = timezone.now()
-    current_session_key = request.session.session_key
-    if current_session_key:
-        LearnerSession.objects.filter(
-            session_key=current_session_key, revoked_at__isnull=True
-        ).update(revoked_at=now)
-    LearnerSession.objects.filter(learner=learner, revoked_at__isnull=True).update(revoked_at=now)
-    request.session.flush()
-    login(request._request, learner)
-    request.session.set_expiry(settings.LEARNER_SESSION_AGE)
-    session_key = request.session.session_key
-    if session_key is None:
-        raise RuntimeError("Django did not create a learner session")
-    return LearnerSession.objects.create(
-        learner=learner,
-        session_key=session_key,
-        device_hash=hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
-    )
-
-
-def _new_transfer_code(transfer_id: uuid.UUID) -> str:
-    public_id = base64.urlsafe_b64encode(transfer_id.bytes).rstrip(b"=").decode("ascii")
-    return f"{public_id}.{secrets.token_urlsafe(16)}"
-
-
-def _transfer_id(code: str) -> uuid.UUID | None:
-    try:
-        public_id, secret = code.split(".", maxsplit=1)
-        if not secret:
-            return None
-        decoded = base64.urlsafe_b64decode(public_id + "=" * (-len(public_id) % 4))
-        if len(decoded) != 16:
-            return None
-        return uuid.UUID(bytes=decoded)
-    except (ValueError, binascii.Error):
-        return None
-
-
-def _invalid_transfer() -> Response:
-    return _private_no_store(
-        Response({"code": "PWA_TRANSFER_INVALID"}, status=status.HTTP_403_FORBIDDEN)
-    )
-
-
 class LearnerSessionAuthentication(SessionAuthentication):
     def authenticate_header(self, request: Request) -> str:
         return "Session"
@@ -127,13 +89,48 @@ class LearnerSessionAuthentication(SessionAuthentication):
             return None
         user, _ = result
         session_key = request.session.session_key
-        learner_session = LearnerSession.objects.filter(session_key=session_key).first()
+        if not session_key:
+            return None
+        learner_session = (
+            LearnerSession.objects.filter(session_key=session_key)
+            .select_related("access_pass", "access_pass__vendor", "device")
+            .first()
+        )
         if learner_session is None or learner_session.learner_id != user.id:
             return None
+        if learner_session.access_pass is None or learner_session.device is None:
+            return None
+        now = timezone.now()
+        if (
+            learner_session.expires_at is not None
+            and learner_session.expires_at <= now
+            and learner_session.revoked_at is None
+        ):
+            LearnerSession.objects.filter(pk=learner_session.pk, revoked_at__isnull=True).update(
+                revoked_at=now, revoke_reason=LearnerSession.RevokeReason.EXPIRED
+            )
+            raise AuthenticationFailed({"code": "SESSION_EXPIRED"}, code="SESSION_EXPIRED")
         if learner_session.revoked_at is not None:
+            code = (
+                "SESSION_REPLACED"
+                if learner_session.revoke_reason == LearnerSession.RevokeReason.REPLACED
+                else "SESSION_REVOKED"
+            )
+            raise AuthenticationFailed({"code": code}, code=code)
+        if learner_session.access_pass.status != AccessPass.Status.ACTIVE:
             raise AuthenticationFailed({"code": "SESSION_REVOKED"}, code="SESSION_REVOKED")
-        LearnerSession.objects.filter(pk=learner_session.pk).update(last_seen_at=timezone.now())
-        return user, learner_session
+        if (
+            learner_session.device.revoked_at is not None
+            or learner_session.pass_generation != learner_session.access_pass.generation
+        ):
+            raise AuthenticationFailed({"code": "SESSION_REPLACED"}, code="SESSION_REPLACED")
+        LearnerSession.objects.filter(pk=learner_session.pk).update(last_seen_at=now)
+        return user, LearnerAuthContext(
+            learner=user,
+            session=learner_session,
+            access_pass=learner_session.access_pass,
+            device=learner_session.device,
+        )
 
 
 class LearnerAPIView(APIView):
@@ -148,166 +145,204 @@ class LearnerCsrfView(APIView):
         return _private_no_store(Response({"csrfToken": get_token(request._request)}))
 
 
-class AccessLinkView(APIView):
+class AccessInspectView(APIView):
     permission_classes = (AllowAny,)
 
-    def get(self, request: Request, token: str) -> Response:
-        link = (
-            AccessLink.objects.filter(token_hash=hash_access_token(token), revoked_at__isnull=True)
-            .select_related("enrollment__course")
-            .first()
-        )
-        if link is None or link.enrollment.status != Enrollment.Status.ACTIVE:
-            raise Http404
+    @method_decorator(csrf_protect)
+    def post(self, request: Request) -> Response:
+        if learner_auth_rate_limited(request._request, "inspect"):
+            return _rate_limited()
+        serializer = AccessInspectSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _validation_error(serializer.errors)
+        data = serializer.validated_data
+        try:
+            access_pass, challenge, device_match, transfer_required = inspect_access(
+                token=str(data["token"]),
+                installation_id=data["installation_id"],
+                public_key_jwk=data["public_key_jwk"],
+            )
+        except InvalidAccessLink:
+            return _private_no_store(
+                Response({"code": "INVALID_ACCESS_LINK"}, status=status.HTTP_404_NOT_FOUND)
+            )
         return _private_no_store(
             Response(
                 {
-                    "email": link.enrollment.learner.email,
-                    "course_title": link.enrollment.course.title,
-                    "ready": True,
+                    "challenge": challenge.challenge,
+                    "transfer_required": transfer_required,
+                    "device_match": device_match,
+                    "generation": access_pass.generation,
                 }
             )
         )
 
 
-class LearnerSessionView(APIView):
+class AccessExchangeView(APIView):
     permission_classes = (AllowAny,)
 
     @method_decorator(csrf_protect)
     def post(self, request: Request) -> Response:
-        token = str(request.data.get("token", ""))
-        link = (
-            AccessLink.objects.filter(token_hash=hash_access_token(token), revoked_at__isnull=True)
-            .select_related("enrollment__learner", "enrollment__course")
-            .first()
-        )
-        if link is None or link.enrollment.status != Enrollment.Status.ACTIVE:
+        if learner_auth_rate_limited(request._request, "exchange"):
+            return _rate_limited()
+        serializer = AccessExchangeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _validation_error(serializer.errors)
+        data = serializer.validated_data
+        try:
+            result = exchange_access(
+                request=request._request,
+                token=str(data["token"]),
+                installation_id=data["installation_id"],
+                public_key_jwk=data["public_key_jwk"],
+                challenge_value=str(data["challenge"]),
+                signature=str(data["signature"]),
+                confirm_transfer=bool(data.get("confirm_transfer", False)),
+            )
+        except InvalidAccessLink:
             return _private_no_store(
-                Response({"code": "ACCESS_REVOKED"}, status=status.HTTP_403_FORBIDDEN)
+                Response({"code": "INVALID_ACCESS_LINK"}, status=status.HTTP_404_NOT_FOUND)
             )
-        with transaction.atomic():
-            learner = User.objects.select_for_update().get(pk=link.enrollment.learner_id)
-            _replace_learner_session(request, learner)
-        return _private_no_store(
-            Response({"ok": True, "course_id": str(link.enrollment.course_id)})
-        )
-
-
-class PwaSessionTransferView(LearnerAPIView):
-    def post(self, request: Request) -> Response:
-        learner = _learner_user(request)
-        source_session = cast(LearnerSession, request.auth)
-        transfer_id = uuid.uuid4()
-        code = _new_transfer_code(transfer_id)
-        now = timezone.now()
-        with transaction.atomic():
-            locked_learner = User.objects.select_for_update().get(pk=learner.pk)
-            locked_source = (
-                LearnerSession.objects.select_for_update()
-                .filter(
-                    pk=source_session.pk,
-                    learner=locked_learner,
-                    revoked_at__isnull=True,
+        except DeviceProofError:
+            return _private_no_store(
+                Response({"code": "DEVICE_PROOF_INVALID"}, status=status.HTTP_401_UNAUTHORIZED)
+            )
+        except TransferConfirmationRequired:
+            return _private_no_store(
+                Response(
+                    {
+                        "code": "DEVICE_TRANSFER_CONFIRMATION_REQUIRED",
+                        "message": "Доступ уже открыт на другом устройстве. "
+                        "Продолжить здесь и завершить предыдущую сессию?",
+                    },
+                    status=status.HTTP_409_CONFLICT,
                 )
-                .first()
-            )
-            if locked_source is None:
-                raise AuthenticationFailed({"code": "SESSION_REVOKED"}, code="SESSION_REVOKED")
-            PwaSessionTransfer.objects.filter(
-                source_session=locked_source, used_at__isnull=True
-            ).update(used_at=now)
-            transfer = PwaSessionTransfer.objects.create(
-                id=transfer_id,
-                learner=locked_learner,
-                source_session=locked_source,
-                code_hash=hash_pwa_transfer_code(code),
-                expires_at=now + timedelta(seconds=settings.PWA_TRANSFER_TTL_SECONDS),
             )
         return _private_no_store(
             Response(
-                {"code": code, "expires_at": transfer.expires_at.isoformat()},
-                status=status.HTTP_201_CREATED,
+                {
+                    "ok": True,
+                    "generation": result.access_pass.generation,
+                    "transfer_performed": result.transfer_performed,
+                }
             )
         )
 
 
-class PwaSessionTransferConsumeView(APIView):
-    permission_classes = (AllowAny,)
+class AuthMeView(LearnerAPIView):
+    def get(self, request: Request) -> Response:
+        context = _learner_context(request)
+        return _private_no_store(
+            Response(
+                {
+                    "email": context.learner.email,
+                    "vendor_id": str(context.access_pass.vendor_id),
+                    "vendor_name": context.access_pass.vendor.name,
+                    "device_id": str(context.device.id),
+                    "installation_id": str(context.device.installation_id),
+                    "generation": context.access_pass.generation,
+                }
+            )
+        )
 
-    @method_decorator(csrf_protect)
+
+class AuthHeartbeatView(LearnerAPIView):
     def post(self, request: Request) -> Response:
-        serializer = PwaSessionTransferConsumeSerializer(data=request.data)
-        if not serializer.is_valid():
-            if pwa_transfer_rate_limited(request._request, None):
-                return self._rate_limited_response()
-            return _invalid_transfer()
-        code = serializer.validated_data["code"]
-        transfer_id = _transfer_id(code)
-        if pwa_transfer_rate_limited(request._request, transfer_id):
-            return self._rate_limited_response()
-        if transfer_id is None:
-            return _invalid_transfer()
-        learner_id = (
-            PwaSessionTransfer.objects.filter(pk=transfer_id)
-            .values_list("learner_id", flat=True)
-            .first()
-        )
-        if learner_id is None:
-            return _invalid_transfer()
-
-        valid = False
-        with transaction.atomic():
-            learner = User.objects.select_for_update().get(pk=learner_id)
-            transfer = (
-                PwaSessionTransfer.objects.select_for_update()
-                .select_related("source_session")
-                .filter(pk=transfer_id, learner=learner)
-                .first()
+        context = _learner_context(request)
+        session_key = request.session.session_key
+        if session_key is not None and heartbeat_rate_limited(request._request, session_key):
+            return _rate_limited()
+        now = timezone.now()
+        AccessPass.objects.filter(pk=context.access_pass.pk).update(last_used_at=now)
+        return _private_no_store(
+            Response(
+                {
+                    "ok": True,
+                    "generation": context.access_pass.generation,
+                    "expires_at": context.session.expires_at.isoformat()
+                    if context.session.expires_at
+                    else None,
+                }
             )
-            now = timezone.now()
-            if transfer is None:
-                pass
-            elif not hmac.compare_digest(transfer.code_hash, hash_pwa_transfer_code(code)):
-                if transfer.failed_attempts < settings.PWA_TRANSFER_MAX_ATTEMPTS:
-                    transfer.failed_attempts += 1
-                    transfer.save(update_fields=("failed_attempts",))
-            elif (
-                transfer.used_at is not None
-                or transfer.expires_at <= now
-                or transfer.failed_attempts >= settings.PWA_TRANSFER_MAX_ATTEMPTS
-                or transfer.source_session.revoked_at is not None
-                or not Session.objects.filter(
-                    session_key=transfer.source_session.session_key,
-                    expire_date__gt=now,
-                ).exists()
-            ):
-                pass
-            else:
-                transfer.used_at = now
-                transfer.save(update_fields=("used_at",))
-                _replace_learner_session(request, learner)
-                valid = True
-        if not valid:
-            return _invalid_transfer()
-        return _private_no_store(Response({"ok": True}))
-
-    @staticmethod
-    def _rate_limited_response() -> Response:
-        response = Response(
-            {"code": "PWA_TRANSFER_RATE_LIMITED"},
-            status=status.HTTP_429_TOO_MANY_REQUESTS,
         )
-        response["Retry-After"] = str(settings.PWA_TRANSFER_RATE_WINDOW_SECONDS)
-        return _private_no_store(response)
 
 
 class LearnerLogoutView(LearnerAPIView):
     def post(self, request: Request) -> Response:
-        LearnerSession.objects.filter(
-            session_key=request.session.session_key, revoked_at__isnull=True
-        ).update(revoked_at=timezone.now())
+        context = _learner_context(request)
+        LearnerSession.objects.filter(pk=context.session.pk, revoked_at__isnull=True).update(
+            revoked_at=timezone.now(), revoke_reason=LearnerSession.RevokeReason.LOGOUT
+        )
+        write_audit(
+            event_type="learner_logout",
+            vendor=context.access_pass.vendor,
+            actor=context.learner,
+            target_type="LearnerSession",
+            target_id=context.session.id,
+            request=request._request,
+        )
         logout(request._request)
-        return Response({"ok": True})
+        return _private_no_store(Response({"ok": True}))
+
+
+class RecoveryRequestView(APIView):
+    permission_classes = (AllowAny,)
+
+    @method_decorator(csrf_protect)
+    def post(self, request: Request) -> Response:
+        email = str(request.data.get("email", "")).strip()
+        if not email:
+            return _validation_error({"email": "Email is required."})
+        ip_limited, email_limited = recovery_request_rate_limited(request._request, email)
+        if not ip_limited and not email_limited:
+            request_recovery(email=email, request=request._request)
+        return _private_no_store(
+            Response(
+                {
+                    "ok": True,
+                    "message": "Если доступ существует, письмо отправлено.",
+                }
+            )
+        )
+
+
+class RecoveryExchangeView(APIView):
+    permission_classes = (AllowAny,)
+
+    @method_decorator(csrf_protect)
+    def post(self, request: Request) -> Response:
+        if learner_auth_rate_limited(request._request, "recovery-exchange"):
+            return _rate_limited()
+        serializer = RecoveryExchangeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _validation_error(serializer.errors)
+        data = serializer.validated_data
+        try:
+            access_pass, raw_token = recover_access(
+                request=request._request,
+                recovery_token=str(data["recovery_token"]),
+                installation_id=data["installation_id"],
+                public_key_jwk=data["public_key_jwk"],
+                signature=str(data["signature"]),
+            )
+        except InvalidRecoveryToken:
+            return _private_no_store(
+                Response({"code": "INVALID_RECOVERY_TOKEN"}, status=status.HTTP_404_NOT_FOUND)
+            )
+        except DeviceProofError:
+            return _private_no_store(
+                Response({"code": "DEVICE_PROOF_INVALID"}, status=status.HTTP_401_UNAUTHORIZED)
+            )
+        return _private_no_store(
+            Response(
+                {
+                    "ok": True,
+                    "access_token": raw_token,
+                    "access_link": f"{settings.PUBLIC_APP_URL}/app/#access={raw_token}",
+                    "generation": access_pass.generation,
+                }
+            )
+        )
 
 
 def _snapshot_course(enrollment: Enrollment) -> dict[str, Any]:
@@ -348,57 +383,61 @@ def _revision_for_course(course: Course, revision_id: object) -> CourseRevision:
     return revision
 
 
+def _viewer(context: LearnerAuthContext) -> dict[str, str]:
+    return {
+        "email": context.learner.email,
+        "session_id": str(context.session.id)[:8],
+    }
+
+
 class LearnerCourseListView(LearnerAPIView):
     def get(self, request: Request) -> Response:
+        context = _learner_context(request)
         enrollments = (
             Enrollment.objects.filter(
-                learner=_learner_user(request),
+                user=context.learner,
+                vendor=context.access_pass.vendor,
                 status=Enrollment.Status.ACTIVE,
                 course__status=Course.Status.PUBLISHED,
             )
             .select_related("course__current_revision")
             .order_by("course__title")
         )
-        return Response(
-            [
-                {
-                    "id": str(enrollment.course_id),
-                    "title": enrollment.course.current_revision.snapshot_json["title"],
-                    "short_description": enrollment.course.current_revision.snapshot_json[
-                        "short_description"
-                    ],
-                    "description_markdown": enrollment.course.current_revision.snapshot_json[
-                        "description_markdown"
-                    ],
-                    "cover_asset_id": enrollment.course.current_revision.snapshot_json.get(
-                        "cover_asset_id"
-                    ),
-                }
-                for enrollment in enrollments
-                if enrollment.course.current_revision is not None
-            ]
+        return _private_no_store(
+            Response(
+                [
+                    {
+                        "id": str(enrollment.course_id),
+                        "title": enrollment.course.current_revision.snapshot_json["title"],
+                        "short_description": enrollment.course.current_revision.snapshot_json[
+                            "short_description"
+                        ],
+                        "description_markdown": enrollment.course.current_revision.snapshot_json[
+                            "description_markdown"
+                        ],
+                        "cover_asset_id": enrollment.course.current_revision.snapshot_json.get(
+                            "cover_asset_id"
+                        ),
+                    }
+                    for enrollment in enrollments
+                    if enrollment.course.current_revision is not None
+                ]
+            )
         )
 
 
 class LearnerCourseDetailView(LearnerAPIView):
     def get(self, request: Request, course_id: uuid.UUID) -> Response:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         snapshot = _snapshot_course(enrollment)
-        learner_session = cast(LearnerSession, request.auth)
-        return Response(
-            {
-                **snapshot,
-                "viewer": {
-                    "email": _learner_user(request).email,
-                    "session_id": str(learner_session.id)[:8],
-                },
-            }
-        )
+        return _private_no_store(Response({**snapshot, "viewer": _viewer(context)}))
 
 
 class LearnerOfflineManifestView(LearnerAPIView):
     def get(self, request: Request, course_id: uuid.UUID) -> Response:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         revision = enrollment.course.current_revision
         if revision is None:
             raise Http404
@@ -419,13 +458,7 @@ class LearnerOfflineManifestView(LearnerAPIView):
                 "course_id": str(enrollment.course_id),
                 "revision_id": str(revision.id),
                 "revision": revision.revision_number,
-                "snapshot": {
-                    **snapshot,
-                    "viewer": {
-                        "email": _learner_user(request).email,
-                        "session_id": str(cast(LearnerSession, request.auth).id)[:8],
-                    },
-                },
+                "snapshot": {**snapshot, "viewer": _viewer(context)},
                 "assets": [
                     {
                         "id": str(asset.id),
@@ -440,13 +473,13 @@ class LearnerOfflineManifestView(LearnerAPIView):
                 "total_size": sum(asset.size_bytes for asset in assets),
             }
         )
-        response["Cache-Control"] = "private, no-store"
-        return response
+        return _private_no_store(response)
 
 
 class LearnerOfflineLicenseView(LearnerAPIView):
     def post(self, request: Request, course_id: uuid.UUID) -> Response:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         current_revision = enrollment.course.current_revision
         if current_revision is None:
             raise Http404
@@ -464,13 +497,13 @@ class LearnerOfflineLicenseView(LearnerAPIView):
                 },
                 status=status.HTTP_409_CONFLICT,
             )
-            response["Cache-Control"] = "private, no-store"
-            return response
+            return _private_no_store(response)
         license_data = issue_offline_license(
-            learner=_learner_user(request),
+            learner=context.learner,
+            access_pass=context.access_pass,
+            device=context.device,
             course=enrollment.course,
             revision=current_revision,
-            session=cast(LearnerSession, request.auth),
         )
         response = Response(
             {
@@ -480,8 +513,7 @@ class LearnerOfflineLicenseView(LearnerAPIView):
                 "update_available": False,
             }
         )
-        response["Cache-Control"] = "private, no-store"
-        return response
+        return _private_no_store(response)
 
 
 class LearnerOfflineMediaContentView(LearnerAPIView):
@@ -492,7 +524,8 @@ class LearnerOfflineMediaContentView(LearnerAPIView):
         revision_id: uuid.UUID,
         asset_id: uuid.UUID,
     ) -> StreamingHttpResponse:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         revision = _revision_for_course(enrollment.course, revision_id)
         snapshot = cast(dict[str, Any], revision.snapshot_json)
         if str(asset_id) not in _offline_asset_ids(snapshot):
@@ -509,12 +542,18 @@ class LearnerOfflineMediaContentView(LearnerAPIView):
 
 class LearnerProgressView(LearnerAPIView):
     def get(self, request: Request, course_id: uuid.UUID) -> Response:
-        _active_enrollment(_learner_user(request), course_id)
-        rows = LessonProgress.objects.filter(learner=_learner_user(request), course_id=course_id)
+        context = _learner_context(request)
+        _active_enrollment(context, course_id)
+        rows = LessonProgress.objects.filter(
+            learner=context.learner,
+            course_id=course_id,
+            course__vendor=context.access_pass.vendor,
+        )
         return Response(LearnerProgressSerializer(rows, many=True).data)
 
     def post(self, request: Request, course_id: uuid.UUID, lesson_id: uuid.UUID) -> Response:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         snapshot = _snapshot_course(enrollment)
         lesson_exists = any(
             lesson["id"] == str(lesson_id)
@@ -528,7 +567,7 @@ class LearnerProgressView(LearnerAPIView):
         percent = serializer.validated_data["percent"]
         completed = serializer.validated_data.get("status") == "completed" or percent == 100
         progress, _ = LessonProgress.objects.get_or_create(
-            learner=_learner_user(request),
+            learner=context.learner,
             lesson_id=lesson_id,
             defaults={
                 "course": enrollment.course,
@@ -548,7 +587,8 @@ class LearnerProgressView(LearnerAPIView):
 
 class LearnerStreamURLView(LearnerAPIView):
     def get(self, request: Request, course_id: uuid.UUID, asset_id: uuid.UUID) -> Response:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         snapshot = _snapshot_course(enrollment)
         asset_ids = {snapshot.get("cover_asset_id")}
         for module in snapshot.get("modules", []):
@@ -577,7 +617,8 @@ class LearnerMediaContentView(LearnerAPIView):
     def get(
         self, request: Request, course_id: uuid.UUID, asset_id: uuid.UUID
     ) -> StreamingHttpResponse:
-        enrollment = _active_enrollment(_learner_user(request), course_id)
+        context = _learner_context(request)
+        enrollment = _active_enrollment(context, course_id)
         snapshot = _snapshot_course(enrollment)
         asset_ids = {snapshot.get("cover_asset_id")}
         for module in snapshot.get("modules", []):
@@ -592,3 +633,15 @@ class LearnerMediaContentView(LearnerAPIView):
         if asset is None:
             raise Http404
         return serve_asset_content(request, asset)
+
+
+def _rate_limited() -> Response:
+    response = Response({"code": "RATE_LIMITED"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    response["Retry-After"] = str(settings.ACCESS_AUTH_RATE_WINDOW_SECONDS)
+    return _private_no_store(response)
+
+
+def _validation_error(errors: dict[str, Any]) -> Response:
+    return _private_no_store(
+        Response({"code": "VALIDATION_ERROR", "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+    )
