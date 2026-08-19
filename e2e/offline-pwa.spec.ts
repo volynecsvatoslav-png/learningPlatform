@@ -223,7 +223,7 @@ test('purges legacy auth entries and never caches access URLs', async ({ context
   const currentSecret = 'current-secret-that-must-not-be-cached'
   await freshPage.goto(`/app/access/${currentSecret}`)
   await expect.poll(() => freshPage.evaluate(() => new URL(window.location.href).pathname)).toBe('/app/')
-  await expect(freshPage.getByRole('heading', { name: 'Не получилось войти' })).toBeVisible()
+  await expect(freshPage.getByRole('heading', { name: 'Вход в кабинет ученика' })).toBeVisible()
   const cachedUrls = await freshPage.evaluate(async () => {
     const names = await caches.keys()
     return (await Promise.all(names.map(async (name) => (await caches.open(name)).keys()))).flat().map((request) => request.url)

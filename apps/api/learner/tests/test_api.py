@@ -142,6 +142,67 @@ def test_used_or_tampered_challenge_is_rejected(client: Client) -> None:
     assert replay.json()["code"] == "DEVICE_PROOF_INVALID"
 
 
+def test_same_installation_id_with_same_key_reauthenticates_without_confirmation(
+    client: Client,
+) -> None:
+    _, _, _, token = make_access()
+    device = make_device()
+    activate(client, token, device=device)
+    assert request_exchange(client, token, device=device).status_code == 200
+    assert LearnerSession.objects.filter(revoked_at__isnull=True).count() == 1
+
+
+def test_same_installation_id_with_different_key_requires_transfer(client: Client) -> None:
+    _, _, _, token = make_access()
+    first_device = make_device()
+    activate(client, token, device=first_device)
+    old_device = Device.objects.get()
+    new_key_device = make_device()
+    same_id_new_key = (first_device[0], new_key_device[1], new_key_device[2])
+
+    inspect = client.post(
+        "/api/v1/auth/access/inspect",
+        data={
+            "token": token,
+            "installation_id": str(first_device[0]),
+            "public_key_jwk": new_key_device[1],
+        },
+        content_type="application/json",
+    )
+    assert inspect.status_code == 200
+    assert inspect.json()["device_match"] is False
+    assert inspect.json()["transfer_required"] is True
+
+    response = request_exchange(client, token, device=same_id_new_key)
+    assert response.status_code == 409
+    assert response.json()["code"] == "DEVICE_TRANSFER_CONFIRMATION_REQUIRED"
+    assert Device.objects.get(pk=old_device.pk).revoked_at is None
+
+    confirmed = request_exchange(client, token, device=same_id_new_key, confirm_transfer=True)
+    assert confirmed.status_code == 200
+    access_pass = AccessPass.objects.get()
+    assert access_pass.generation == 2
+    old_device.refresh_from_db()
+    assert old_device.revoked_at is not None
+    activated = Device.objects.get(revoked_at__isnull=True)
+    assert activated.id != old_device.id
+    assert activated.installation_id == first_device[0]
+    assert activated.public_key_fingerprint != old_device.public_key_fingerprint
+
+
+def test_reauthentication_as_transfer_does_not_reuse_a_stale_key(client: Client) -> None:
+    _, _, _, token = make_access()
+    first_device = make_device()
+    activate(client, token, device=first_device)
+
+    second_device = make_device()
+    activate(client, token, device=second_device, confirm_transfer=True)
+
+    stale_key_attempt = request_exchange(client, token, device=first_device)
+    assert stale_key_attempt.status_code == 409
+    assert stale_key_attempt.json()["code"] == "DEVICE_TRANSFER_CONFIRMATION_REQUIRED"
+
+
 @pytest.mark.django_db(transaction=True)
 def test_exchange_and_recovery_work_without_ambient_transaction(client: Client) -> None:
     cache.clear()

@@ -97,19 +97,6 @@ class AccessPass(models.Model):
         ordering = ("-created_at",)
 
 
-class AccessLink(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    enrollment = models.ForeignKey(
-        Enrollment, on_delete=models.CASCADE, related_name="access_links"
-    )
-    token_hash = models.CharField(max_length=64, unique=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    revoked_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        ordering = ("-created_at",)
-
-
 class Device(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     access_pass = models.ForeignKey(AccessPass, on_delete=models.CASCADE, related_name="devices")

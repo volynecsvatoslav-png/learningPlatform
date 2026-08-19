@@ -255,6 +255,36 @@ describe('LearnerPage', () => {
     expect(requests.find((item) => item.url.endsWith('/api/v1/auth/access/exchange'))?.body).toContain('pasted-token')
   })
 
+  it('ignores a legacy /app/access/<token> path and shows the login screen', async () => {
+    setStandalone(true)
+    const requests: Array<{ url: string; body?: BodyInit | null }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, options) => {
+      const url = requestUrl(input)
+      requests.push({ url, body: options?.body })
+      if (url.endsWith('/api/v1/learner/courses')) return response({ code: 'NOT_AUTHENTICATED' }, 401)
+      return response({ code: 'NOT_AUTHENTICATED' }, 401)
+    }))
+    renderPage('/app/access/legacy-token')
+
+    expect(await screen.findByRole('heading', { name: 'Вход в кабинет ученика' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/app/')
+    expect(requests.some((item) => item.url.endsWith('/api/v1/auth/access/inspect'))).toBe(false)
+    expect(requests.some((item) => item.url.endsWith('/api/v1/auth/access/exchange'))).toBe(false)
+    expect(requests.some((item) => item.url.includes('legacy-token'))).toBe(false)
+  })
+
+  it('rejects a pasted legacy /app/access/<token> link', async () => {
+    setStandalone(true)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ code: 'NOT_AUTHENTICATED' }, 401)))
+    renderPage()
+
+    await screen.findByRole('heading', { name: 'Вход в кабинет ученика' })
+    fireEvent.change(screen.getByLabelText('Полная ссылка из письма'), { target: { value: 'https://learning.example/app/access/legacy-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Войти по ссылке' }))
+
+    expect(await screen.findByText('Вставьте полную ссылку из письма.')).toBeInTheDocument()
+  })
+
   it('sends a recovery request with the entered email', async () => {
     setStandalone(true)
     const requests: Array<{ url: string; body?: BodyInit | null }> = []

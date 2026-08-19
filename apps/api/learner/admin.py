@@ -1,7 +1,6 @@
 from django.contrib import admin
 
 from learner.models import (
-    AccessLink,
     AccessPass,
     Device,
     Enrollment,
@@ -50,9 +49,3 @@ class OfflineLicenseAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 class RecoveryChallengeAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = ("user", "vendor", "created_at", "expires_at", "used_at")
     readonly_fields = tuple(field.name for field in RecoveryChallenge._meta.fields)
-
-
-@admin.register(AccessLink)
-class AccessLinkAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
-    list_display = ("enrollment", "created_at", "revoked_at")
-    readonly_fields = tuple(field.name for field in AccessLink._meta.fields)

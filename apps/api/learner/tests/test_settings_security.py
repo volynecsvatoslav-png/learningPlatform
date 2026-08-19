@@ -26,17 +26,36 @@ def key_pair() -> tuple[str, str]:
     return base64.b64encode(private_pem).decode("ascii"), json.dumps(public_jwk)
 
 
+PEPPERS = ("settings-security-test-pepper-access", "settings-security-test-pepper-session")
+
+
 def import_production_settings(
-    *, private_key: str | None, public_jwk: str | None
+    *,
+    private_key: str | None,
+    public_jwk: str | None,
+    peppers: tuple[str | None, str | None] | None = None,
+    secret_key: str = "settings-security-test-secret",
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(
         {
             "DJANGO_DEBUG": "false",
-            "DJANGO_SECRET_KEY": "settings-security-test-secret",
+            "DJANGO_SECRET_KEY": secret_key,
             "DATABASE_URL": "postgresql://learning:learning@localhost:5432/learning",
         }
     )
+    if peppers is not None:
+        for name, value in (
+            ("ACCESS_TOKEN_PEPPER", peppers[0]),
+            ("SESSION_TOKEN_PEPPER", peppers[1]),
+        ):
+            if value is None:
+                environment.pop(name, None)
+            else:
+                environment[name] = value
+    else:
+        environment.pop("ACCESS_TOKEN_PEPPER", None)
+        environment.pop("SESSION_TOKEN_PEPPER", None)
     for name, value in (
         ("OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64", private_key),
         ("VITE_OFFLINE_LICENSE_PUBLIC_JWK", public_jwk),
@@ -56,7 +75,7 @@ def import_production_settings(
 
 
 def test_production_settings_require_private_offline_key() -> None:
-    result = import_production_settings(private_key=None, public_jwk=None)
+    result = import_production_settings(private_key=None, public_jwk=None, peppers=PEPPERS)
     assert result.returncode != 0
     assert "OFFLINE_LICENSE_SIGNING_PRIVATE_KEY_B64 is required" in result.stderr
 
@@ -73,6 +92,7 @@ def test_production_settings_reject_development_offline_key() -> None:
     result = import_production_settings(
         private_key=DEVELOPMENT_OFFLINE_LICENSE_PRIVATE_KEY_B64,
         public_jwk=json.dumps(DEVELOPMENT_OFFLINE_LICENSE_PUBLIC_JWK),
+        peppers=PEPPERS,
     )
     assert result.returncode != 0
     assert "Development offline license keys cannot be used" in result.stderr
@@ -83,6 +103,7 @@ def test_production_settings_reject_mismatched_public_jwk() -> None:
     result = import_production_settings(
         private_key=private_key,
         public_jwk=json.dumps(DEVELOPMENT_OFFLINE_LICENSE_PUBLIC_JWK),
+        peppers=PEPPERS,
     )
     assert result.returncode != 0
     assert "does not match VITE_OFFLINE_LICENSE_PUBLIC_JWK" in result.stderr
@@ -90,5 +111,60 @@ def test_production_settings_reject_mismatched_public_jwk() -> None:
 
 def test_production_settings_accept_matching_custom_key_pair() -> None:
     private_key, public_jwk = key_pair()
+    result = import_production_settings(
+        private_key=private_key, public_jwk=public_jwk, peppers=PEPPERS
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_production_settings_require_explicit_peppers() -> None:
+    private_key, public_jwk = key_pair()
     result = import_production_settings(private_key=private_key, public_jwk=public_jwk)
+    assert result.returncode != 0
+    assert "ACCESS_TOKEN_PEPPER is required" in result.stderr
+    only_access = import_production_settings(
+        private_key=private_key, public_jwk=public_jwk, peppers=(PEPPERS[0], None)
+    )
+    assert only_access.returncode != 0
+    assert "SESSION_TOKEN_PEPPER is required" in only_access.stderr
+
+
+def test_production_settings_reject_identical_peppers() -> None:
+    private_key, public_jwk = key_pair()
+    result = import_production_settings(
+        private_key=private_key, public_jwk=public_jwk, peppers=(PEPPERS[0], PEPPERS[0])
+    )
+    assert result.returncode != 0
+    assert "must differ" in result.stderr
+
+
+def test_production_settings_reject_pepper_equal_to_secret_key() -> None:
+    private_key, public_jwk = key_pair()
+    result = import_production_settings(
+        private_key=private_key,
+        public_jwk=public_jwk,
+        secret_key="settings-security-test-secret-key-1234567890",
+        peppers=(
+            "settings-security-test-secret-key-1234567890",
+            "settings-security-test-pepper-session",
+        ),
+    )
+    assert result.returncode != 0
+    assert "must differ" in result.stderr
+
+
+def test_production_settings_reject_short_peppers() -> None:
+    private_key, public_jwk = key_pair()
+    result = import_production_settings(
+        private_key=private_key, public_jwk=public_jwk, peppers=("short", "also-short")
+    )
+    assert result.returncode != 0
+    assert "at least 32 bytes" in result.stderr
+
+
+def test_production_settings_accept_matching_custom_peppers() -> None:
+    private_key, public_jwk = key_pair()
+    result = import_production_settings(
+        private_key=private_key, public_jwk=public_jwk, peppers=PEPPERS
+    )
     assert result.returncode == 0, result.stderr

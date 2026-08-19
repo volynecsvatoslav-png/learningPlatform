@@ -16,16 +16,8 @@ function Markdown({ text }: { text: string }) {
 }
 
 function entranceFromLocation(): EntranceToken | null {
-  const legacyMatch = /^\/app\/access\/([^/]+)\/?$/.exec(window.location.pathname)
+  if (/^\/app\/access\//.test(window.location.pathname)) return null
   const fragment = new URLSearchParams(window.location.hash.slice(1))
-  const legacyToken = legacyMatch?.[1]
-  if (legacyToken) {
-    try {
-      return { kind: 'access', value: decodeURIComponent(legacyToken) }
-    } catch {
-      return null
-    }
-  }
   const access = fragment.get('access')
   if (access) return { kind: 'access', value: access }
   const recovery = fragment.get('recovery')
@@ -41,15 +33,6 @@ function entranceFromPastedLink(value: string): EntranceToken | null {
   try {
     const url = new URL(value.trim())
     if (!['http:', 'https:'].includes(url.protocol)) return null
-    const legacyMatch = /^\/app\/access\/([^/]+)\/?$/.exec(url.pathname)
-    const legacyToken = legacyMatch?.[1]
-    if (legacyToken) {
-      try {
-        return { kind: 'access', value: decodeURIComponent(legacyToken) }
-      } catch {
-        return null
-      }
-    }
     const fragment = new URLSearchParams(url.hash.slice(1))
     const access = fragment.get('access')
     if (access) return { kind: 'access', value: access }
@@ -197,6 +180,11 @@ function SessionEnded({ reason, onBack, onLogout }: { reason: SessionEndReason; 
 
 export function MediaUnit({ courseId, unit, watermark, offlinePackage, offlineAssetAvailable, snapshotLoadedOffline }: { courseId: string; unit: ContentUnit; watermark: string; offlinePackage?: OfflinePackage; offlineAssetAvailable: boolean; snapshotLoadedOffline: boolean }) {
   const media = useQuery({ queryKey: ['learner-media', courseId, unit.media_asset_id], queryFn: () => learnerApi.streamUrl(courseId, unit.media_asset_id ?? ''), enabled: Boolean(unit.media_asset_id), networkMode: 'always', retry: false })
+  useEffect(() => {
+    if ((unit.type === 'audio' || unit.type === 'video') && navigator.onLine) {
+      learnerApi.heartbeat().catch(() => undefined)
+    }
+  }, [unit.type, unit.media_asset_id])
   const offlineSource = offlineAssetAvailable ? offlineMediaUrl(courseId, unit.media_asset_id ?? '') : undefined
   const source = media.data?.url ?? offlineSource
   if (!media.data && offlineSource && offlinePackage && offlinePackage.licenseClaims.expires_at * 1000 <= Date.now()) return <p className="form-error">Подключитесь к интернету для продления офлайн-доступа.</p>
@@ -312,6 +300,9 @@ export function LearnerPage() {
   const serviceWorkerReady = useServiceWorkerReady()
   const channel = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
+    if (/^\/app\/access\//.test(window.location.pathname)) {
+      window.history.replaceState({}, '', '/app/')
+    }
     const token = entranceFromLocation()
     if (token) {
       noReferrerWhileTokenVisible()

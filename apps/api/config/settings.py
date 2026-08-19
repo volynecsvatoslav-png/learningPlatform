@@ -209,10 +209,33 @@ TRUSTED_PROXY_CIDRS = tuple(
     for value in os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128").split(",")
     if value.strip()
 )
-ACCESS_TOKEN_PEPPER = os.getenv("ACCESS_TOKEN_PEPPER") or (SECRET_KEY + ":access-token")
-SESSION_TOKEN_PEPPER = os.getenv("SESSION_TOKEN_PEPPER") or (SECRET_KEY + ":session-token")
-if len(ACCESS_TOKEN_PEPPER.encode("utf-8")) < 32 or len(SESSION_TOKEN_PEPPER.encode("utf-8")) < 32:
-    raise ValueError("ACCESS_TOKEN_PEPPER and SESSION_TOKEN_PEPPER must be at least 32 bytes")
+
+
+def _require_pepper(name: str, suffix: str, value: str | None) -> str:
+    if value is None:
+        if DEBUG:
+            return f"{SECRET_KEY}:{suffix}"
+        raise ValueError(f"{name} is required when DJANGO_DEBUG=false")
+    if len(value.encode("utf-8")) < 32:
+        raise ValueError(f"{name} must be at least 32 bytes")
+    return value
+
+
+ACCESS_TOKEN_PEPPER = _require_pepper(
+    "ACCESS_TOKEN_PEPPER", "access-token", os.getenv("ACCESS_TOKEN_PEPPER")
+)
+SESSION_TOKEN_PEPPER = _require_pepper(
+    "SESSION_TOKEN_PEPPER", "session-token", os.getenv("SESSION_TOKEN_PEPPER")
+)
+if (
+    ACCESS_TOKEN_PEPPER == SESSION_TOKEN_PEPPER
+    or ACCESS_TOKEN_PEPPER == SECRET_KEY
+    or SESSION_TOKEN_PEPPER == SECRET_KEY
+):
+    raise ValueError(
+        "ACCESS_TOKEN_PEPPER and SESSION_TOKEN_PEPPER must differ from each other "
+        "and from DJANGO_SECRET_KEY"
+    )
 DEVICE_CHALLENGE_TTL_SECONDS = int(os.getenv("DEVICE_CHALLENGE_TTL_SECONDS", "300"))
 RECOVERY_TOKEN_TTL_SECONDS = int(os.getenv("RECOVERY_TOKEN_TTL_SECONDS", "900"))
 RECOVERY_REQUEST_RATE_WINDOW_SECONDS = int(

@@ -354,7 +354,12 @@ def inspect_access(
         .order_by("-last_seen_at")
         .first()
     )
-    device_match = existing is not None and existing.installation_id == installation_id
+    fingerprint = jwk_fingerprint(public_key_jwk)
+    device_match = (
+        existing is not None
+        and existing.installation_id == installation_id
+        and existing.public_key_fingerprint == fingerprint
+    )
     transfer_required = existing is not None and not device_match
     return access_pass, challenge, device_match, transfer_required
 
@@ -432,7 +437,12 @@ def exchange_access(
             .order_by("-last_seen_at")
             .first()
         )
-        device_match = existing is not None and existing.installation_id == installation_id
+        fingerprint = jwk_fingerprint(normalized_jwk)
+        device_match = (
+            existing is not None
+            and existing.installation_id == installation_id
+            and existing.public_key_fingerprint == fingerprint
+        )
         transfer_performed = False
         if not device_match and existing is not None:
             if not confirm_transfer:
