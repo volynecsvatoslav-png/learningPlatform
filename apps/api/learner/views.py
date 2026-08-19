@@ -268,20 +268,35 @@ class AuthHeartbeatView(LearnerAPIView):
         )
 
 
-class LearnerLogoutView(LearnerAPIView):
+class LearnerLogoutView(APIView):
+    authentication_classes = (LearnerSessionAuthentication,)
+    permission_classes = (AllowAny,)
+
+    def perform_authentication(self, request: Request) -> None:
+        try:
+            super().perform_authentication(request)
+        except AuthenticationFailed:
+            pass
+
+    @method_decorator(csrf_protect)
     def post(self, request: Request) -> Response:
-        context = _learner_context(request)
-        LearnerSession.objects.filter(pk=context.session.pk, revoked_at__isnull=True).update(
-            revoked_at=timezone.now(), revoke_reason=LearnerSession.RevokeReason.LOGOUT
-        )
-        write_audit(
-            event_type="learner_logout",
-            vendor=context.access_pass.vendor,
-            actor=context.learner,
-            target_type="LearnerSession",
-            target_id=context.session.id,
-            request=request._request,
-        )
+        try:
+            context = _learner_context(request)
+        except AuthenticationFailed:
+            context = None
+        if context is not None:
+            LearnerSession.objects.filter(pk=context.session.pk, revoked_at__isnull=True).update(
+                revoked_at=timezone.now(),
+                revoke_reason=LearnerSession.RevokeReason.LOGOUT,
+            )
+            write_audit(
+                event_type="learner_logout",
+                vendor=context.access_pass.vendor,
+                actor=context.learner,
+                target_type="LearnerSession",
+                target_id=context.session.id,
+                request=request._request,
+            )
         logout(request._request)
         return _private_no_store(Response({"ok": True}))
 

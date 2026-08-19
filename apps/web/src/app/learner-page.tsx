@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, learnerApi, resetCsrfTokens, type ContentUnit, type LearnerCourse, type LearnerProgress, type LearnerSnapshot } from '../lib/api'
 import { getAccessDevice, sha256Hex, type AccessDevice } from '../lib/device-keys'
+import { ensureFreshHeartbeat, resetHeartbeatCache } from '../lib/heartbeat'
 import { deleteAllOfflineCourses, deleteOfflineCourse, downloadOfflineCourse, formatBytes, getOfflinePackage, listOfflineCourses, offlineMediaUrl, readOfflineSnapshot, syncOfflineCourse, syncOfflineCourses, type OfflinePackage } from '../offline/offline-course'
 
 type EntranceToken = { kind: 'access' | 'recovery'; value: string }
@@ -166,7 +167,7 @@ function usePlaybackGate<T extends HTMLMediaElement>(options: { online: boolean;
       verifying.current = true
       setGateError('')
       try {
-        await learnerApi.heartbeat()
+        await ensureFreshHeartbeat()
         verified.current = true
         void media.play().catch(() => undefined)
       } catch (reason) {
@@ -311,13 +312,6 @@ function CourseView({ courseId, onBack, onSessionTerminated }: { courseId: strin
       save.mutate({ id: lesson.id, percent: Math.max(1, lessonProgress?.percent ?? 0) })
     }
   }, [lesson, lessonProgress, online, recordedLessonId, save])
-  useEffect(() => {
-    const error = course.error ?? progress.error
-    if (error instanceof ApiError) {
-      const reason = sessionEndReason(error.code)
-      if (reason) onSessionTerminated(reason)
-    }
-  }, [course.error, progress.error, onSessionTerminated])
   if (course.isLoading || progress.isLoading) return <main className="loading-screen">Загрузка курса...</main>
   const requestError = course.error ?? progress.error
   if (requestError instanceof ApiError) {
@@ -367,6 +361,9 @@ export function LearnerPage() {
   const sessionTerminated = useRef(false)
   const broadcastReceived = useRef(false)
   useEffect(() => {
+    resetHeartbeatCache()
+  }, [authEpoch])
+  useEffect(() => {
     if (/^\/app\/access\//.test(window.location.pathname)) {
       window.history.replaceState({}, '', '/app/')
     }
@@ -408,7 +405,7 @@ export function LearnerPage() {
     stopActiveMedia()
     queryClient.clear()
     window.history.replaceState({}, '', '/app/')
-    if (purgeOffline) void deleteAllOfflineCourses().catch(() => undefined)
+    if (purgeOffline && reason !== 'replaced') void deleteAllOfflineCourses().catch(() => undefined)
     setEntrance(null)
     setCourseId(null)
     setSessionEnd(reason)
@@ -426,7 +423,7 @@ export function LearnerPage() {
     try { return await learnerApi.courses() } catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; const local = await listOfflineCourses(); if (local.length) return local; throw error instanceof Error ? error : new Error('Не удалось загрузить курсы.') }
   }, enabled: locationReady && !courseId && !entrance })
   const authenticated = !sessionEnd && !sessionEndDismissed && !entrance && (courseId !== null || existingCourses.data !== undefined)
-  const heartbeat = useQuery({ queryKey: ['learner-heartbeat', authEpoch], queryFn: learnerApi.heartbeat, enabled: authenticated, refetchInterval: 10_000, networkMode: 'always', retry: false })
+  const heartbeat = useQuery({ queryKey: ['learner-heartbeat', authEpoch], queryFn: () => ensureFreshHeartbeat(), enabled: authenticated, refetchInterval: 10_000, networkMode: 'always', retry: false })
   const logout = useMutation({ mutationFn: async () => { try { await learnerApi.logout().catch(() => undefined) } finally { await deleteAllOfflineCourses().catch(() => undefined) } }, onSuccess: () => {
     queryClient.clear()
     window.history.replaceState({}, '', '/app/')

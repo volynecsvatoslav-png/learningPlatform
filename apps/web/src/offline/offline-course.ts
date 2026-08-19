@@ -218,7 +218,7 @@ export async function syncOfflineCourse(courseId: string): Promise<OfflinePackag
       await putPackage(outdated)
       return outdated
     }
-    if (error instanceof ApiError && [401, 403, 404].includes(error.status)) await deleteOfflineCourse(courseId)
+    if (error instanceof ApiError && [401, 403, 404].includes(error.status) && error.code !== 'SESSION_REPLACED') await deleteOfflineCourse(courseId)
     throw error
   }
 }

@@ -186,6 +186,18 @@ describe('offline course storage', () => {
     expect(await getKey(downloaded.packageId)).toBeUndefined()
   })
 
+  it('keeps the package when the session was replaced during sync', async () => {
+    vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
+    vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))
+    vi.stubGlobal('fetch', chunkFetch(new Uint8Array([1, 2, 3, 4, 5, 6])))
+    const downloaded = await downloadOfflineCourse('course-1', () => undefined, new AbortController().signal)
+    vi.spyOn(learnerApi, 'offlineLicense').mockRejectedValue(new ApiError(401, 'SESSION_REPLACED'))
+
+    await expect(syncOfflineCourse('course-1')).rejects.toMatchObject({ status: 401 })
+    expect(await getOfflinePackage('course-1')).toBeDefined()
+    expect(await getKey(downloaded.packageId)).toBeDefined()
+  })
+
   it('keeps the old revision until a complete update replaces it', async () => {
     const manifestSpy = vi.spyOn(learnerApi, 'offlineManifest').mockResolvedValue(manifest())
     const licenseSpy = vi.spyOn(learnerApi, 'offlineLicense').mockResolvedValue(signedLicense('revision-1'))

@@ -488,6 +488,24 @@ def test_me_heartbeat_and_logout(client: Client) -> None:
     assert client.get("/api/v1/learner/courses").status_code == 401
 
 
+def test_logout_after_session_replacement_still_clears_the_session(client: Client) -> None:
+    _, _, _, token = make_access()
+    first = Client()
+    second = Client()
+    activate(first, token, device=make_device())
+    old_session = LearnerSession.objects.get()
+    activate(second, token, device=make_device(), confirm_transfer=True)
+    old_session.refresh_from_db()
+    assert old_session.revoke_reason == LearnerSession.RevokeReason.REPLACED
+
+    assert first.post("/api/v1/auth/logout").status_code == 200
+    old_session.refresh_from_db()
+    assert old_session.revoke_reason == LearnerSession.RevokeReason.REPLACED
+    assert first.get("/api/v1/learner/courses").status_code == 401
+    assert second.get("/api/v1/learner/courses").status_code == 200
+    assert LearnerSession.objects.filter(revoked_at__isnull=True).count() == 1
+
+
 def test_heartbeat_rate_limited(client: Client, settings) -> None:  # type: ignore[no-untyped-def]
     cache.clear()
     settings.HEARTBEAT_RATE_LIMIT = 1
