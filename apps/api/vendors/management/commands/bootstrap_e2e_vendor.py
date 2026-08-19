@@ -1,5 +1,4 @@
 import os
-import secrets
 
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
@@ -10,7 +9,6 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from accounts.models import User
-from learner.models import AccessPass, Enrollment, hash_access_token
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import publish_course
 from vendors.models import Vendor, VendorMember
@@ -33,22 +31,13 @@ class Command(BaseCommand):
         vendor_slug = values["E2E_VENDOR_B_SLUG"].strip()
         course_title = values["E2E_VENDOR_B_COURSE_TITLE"].strip()
         course_slug = values["E2E_VENDOR_B_COURSE_SLUG"].strip()
-        learner_email = User.objects.normalize_email_address(values["E2E_VENDOR_B_LEARNER_EMAIL"])
-        self._validate(
-            owner_email,
-            password,
-            vendor_name,
-            vendor_slug,
-            course_title,
-            course_slug,
-            learner_email,
-        )
+        self._validate(owner_email, password, vendor_name, vendor_slug, course_title, course_slug)
 
+        created = False
         try:
             with transaction.atomic():
                 vendor = Vendor.objects.filter(slug=vendor_slug).first()
                 owner = User.objects.filter(email=owner_email).first()
-                learner = User.objects.filter(email=learner_email).first()
                 if vendor is None and owner is None:
                     vendor = Vendor.objects.create(
                         name=vendor_name,
@@ -83,6 +72,7 @@ class Command(BaseCommand):
 
                 course = Course.objects.filter(vendor=vendor, slug=course_slug).first()
                 if course is None:
+                    created = True
                     course = Course.objects.create(
                         vendor=vendor,
                         title=course_title,
@@ -102,53 +92,21 @@ class Command(BaseCommand):
                     )
                     course.status = Course.Status.PUBLISHED
                     publish_course(course)
-
-                if learner is None:
-                    learner = User.objects.create_user(
-                        learner_email,
-                        email_verified_at=timezone.now(),
-                        is_active=True,
-                        is_staff=False,
-                        is_superuser=False,
-                    )
-                Enrollment.objects.get_or_create(
-                    user=learner,
-                    course=course,
-                    defaults={
-                        "vendor": vendor,
-                        "status": Enrollment.Status.ACTIVE,
-                        "source": Enrollment.Source.MANUAL,
-                    },
-                )
-                access_pass = AccessPass.objects.filter(
-                    vendor=vendor, user=learner, status=AccessPass.Status.ACTIVE
-                ).first()
-                if access_pass is None:
-                    raw_token = secrets.token_urlsafe(32)
-                    access_pass = AccessPass.objects.create(
-                        vendor=vendor,
-                        user=learner,
-                        token_hash=hash_access_token(raw_token),
-                        token_prefix=raw_token[:8],
-                        generation=1,
-                    )
-                else:
-                    raw_token = None
         except IntegrityError as error:
             raise CommandError(
                 "E2E vendor B bootstrap refused because the tuple conflicts."
             ) from error
 
-        if raw_token is None:
+        if created:
+            self.stdout.write(
+                self.style.SUCCESS(f"E2E vendor B bootstrap complete: {vendor_slug}.")
+            )
+        else:
             self.stdout.write(
                 self.style.WARNING(
-                    f"E2E vendor B tuple already exists for {vendor_slug}; "
-                    "refusing to print a new access token."
+                    f"E2E vendor B tuple already exists for {vendor_slug}; nothing to create."
                 )
             )
-            return
-        link = f"{settings.PUBLIC_APP_URL}/app/#access={raw_token}"
-        self.stdout.write(self.style.SUCCESS(f"E2E_VENDOR_B_ACCESS_LINK={link}"))
 
     @staticmethod
     def _environment() -> dict[str, str]:
@@ -159,7 +117,6 @@ class Command(BaseCommand):
             "E2E_VENDOR_B_OWNER_PASSWORD",
             "E2E_VENDOR_B_COURSE_TITLE",
             "E2E_VENDOR_B_COURSE_SLUG",
-            "E2E_VENDOR_B_LEARNER_EMAIL",
         )
         values = {name: os.getenv(name, "") for name in names}
         missing = [name for name, value in values.items() if not value.strip()]
@@ -175,15 +132,11 @@ class Command(BaseCommand):
         vendor_slug: str,
         course_title: str,
         course_slug: str,
-        learner_email: str,
     ) -> None:
         try:
             validate_email(owner_email)
-            validate_email(learner_email)
         except ValidationError as error:
-            raise CommandError(
-                "E2E_VENDOR_B_OWNER_EMAIL or E2E_VENDOR_B_LEARNER_EMAIL is invalid."
-            ) from error
+            raise CommandError("E2E_VENDOR_B_OWNER_EMAIL is invalid.") from error
         if not vendor_name or len(vendor_name) > 200:
             raise CommandError("E2E_VENDOR_B_NAME is invalid.")
         if not course_title or len(course_title) > 200:

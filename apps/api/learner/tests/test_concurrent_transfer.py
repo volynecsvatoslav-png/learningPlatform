@@ -8,7 +8,7 @@ from django.test import Client
 
 from accounts.models import User
 from learner.models import AccessPass, Device, Enrollment, LearnerSession, hash_access_token
-from learner.tests.helpers import activate, make_device, request_exchange
+from learner.tests.helpers import activate, make_device
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import publish_course
 from vendors.models import Vendor
@@ -41,34 +41,67 @@ def _make_access(email: str) -> str:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("iteration", range(10))
-def test_concurrent_transfers_leave_exactly_one_active_session(iteration: int) -> None:
+def test_deterministic_concurrent_transfers_leave_exactly_one_active_session(
+    iteration: int,
+) -> None:
     cache.clear()
     token = _make_access(f"learner-{iteration}@example.com")
-    first = Client()
-    activate(first, token, device=make_device())
+    activate(Client(), token, device=make_device())
+
+    devices = [make_device() for _ in range(2)]
+    challenges: list[str] = []
+    for device in devices:
+        inspect = Client().post(
+            "/api/v1/auth/access/inspect",
+            data={
+                "token": token,
+                "installation_id": str(device[0]),
+                "public_key_jwk": device[1],
+            },
+            content_type="application/json",
+        )
+        assert inspect.status_code == 200, inspect.content
+        challenges.append(inspect.json()["challenge"])
+    assert challenges[0] != challenges[1]
 
     barrier = threading.Barrier(2)
-    results: list[int] = []
+    results: list[dict[str, object]] = []
     lock = threading.Lock()
 
-    def worker() -> None:
+    def worker(index: int) -> None:
         barrier.wait()
         try:
-            response = request_exchange(
-                Client(), token, device=make_device(), confirm_transfer=True
+            response = Client().post(
+                "/api/v1/auth/access/exchange",
+                data={
+                    "token": token,
+                    "installation_id": str(devices[index][0]),
+                    "public_key_jwk": devices[index][1],
+                    "challenge": challenges[index],
+                    "signature": devices[index][2](challenges[index].encode("ascii")),
+                    "confirm_transfer": True,
+                },
+                content_type="application/json",
             )
+            if response.status_code == 200:
+                outcome: dict[str, object] = {"status": response.status_code}
+            else:
+                outcome = {"status": response.status_code, "code": response.json().get("code")}
+        except Exception as error:
+            outcome = {"raised": type(error).__name__}
         finally:
             connections.close_all()
         with lock:
-            results.append(response.status_code)
+            results.append(outcome)
 
-    threads = [threading.Thread(target=worker) for _ in range(2)]
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    assert sorted(results) == [200, 200], f"unexpected exchange results: {results}"
+    errors = [result for result in results if result != {"status": 200}]
+    assert errors == [], f"unexpected exchange results: {results}"
     active_devices = list(Device.objects.filter(revoked_at__isnull=True))
     active_sessions = list(LearnerSession.objects.filter(revoked_at__isnull=True))
     assert len(active_devices) == 1

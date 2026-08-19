@@ -100,12 +100,28 @@ jobs:
             -e E2E_VENDOR_NAME="E2E Vendor" \
             -e E2E_VENDOR_SLUG=e2e-vendor \
             api python manage.py bootstrap_e2e_owner
+      - name: Bootstrap E2E vendor B
+        run: |
+          docker compose exec -T \
+            -e E2E_BOOTSTRAP_ENABLED=true \
+            -e E2E_VENDOR_B_NAME="E2E Vendor B" \
+            -e E2E_VENDOR_B_SLUG=e2e-vendor-b \
+            -e E2E_VENDOR_B_OWNER_EMAIL=owner.b@example.com \
+            -e E2E_VENDOR_B_OWNER_PASSWORD="unusual e2e vendor b password 73918" \
+            -e E2E_VENDOR_B_COURSE_TITLE="E2E Course B" \
+            -e E2E_VENDOR_B_COURSE_SLUG=e2e-course-b \
+            api python manage.py bootstrap_e2e_vendor
       - name: Vendor and learner E2E
         run: npm run test:e2e
         env:
           E2E_OWNER_EMAIL: owner.e2e@example.com
           E2E_OWNER_PASSWORD: "unusual e2e password 48371"
           E2E_VENDOR_NAME: E2E Vendor
+          E2E_VENDOR_B_OWNER_EMAIL: owner.b@example.com
+          E2E_VENDOR_B_OWNER_PASSWORD: "unusual e2e vendor b password 73918"
+          E2E_VENDOR_B_NAME: E2E Vendor B
+          E2E_VENDOR_B_COURSE_TITLE: E2E Course B
+          E2E_LEARNER_EMAIL: learner.global@example.com
           E2E_BASE_URL: http://localhost:5173
           E2E_MAILPIT_URL: http://localhost:8025
       - name: Offline PWA E2E

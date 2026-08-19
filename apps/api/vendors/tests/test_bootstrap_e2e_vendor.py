@@ -1,13 +1,11 @@
 from io import StringIO
 
 import pytest
-from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import override_settings
 
 from accounts.models import User
-from learner.models import AccessPass, Enrollment
 from learning.models import ContentUnit, Course, Lesson, Module
 from vendors.models import Vendor, VendorMember
 
@@ -22,7 +20,6 @@ ENVIRONMENT = {
     "E2E_VENDOR_B_OWNER_PASSWORD": PASSWORD,
     "E2E_VENDOR_B_COURSE_TITLE": "E2E Course B",
     "E2E_VENDOR_B_COURSE_SLUG": "e2e-course-b",
-    "E2E_VENDOR_B_LEARNER_EMAIL": "learner-b@example.com",
 }
 
 
@@ -64,16 +61,13 @@ def test_requires_all_environment_variables(monkeypatch: pytest.MonkeyPatch) -> 
     assert not Vendor.objects.exists()
 
 
-def test_creates_vendor_b_owner_course_enrollment_and_access_pass(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_creates_vendor_b_owner_and_published_course(monkeypatch: pytest.MonkeyPatch) -> None:
     configure_environment(monkeypatch)
 
     output = run_command()
 
     vendor = Vendor.objects.get(slug="e2e-vendor-b")
     owner = User.objects.get(email="owner-b@example.com")
-    learner = User.objects.get(email="learner-b@example.com")
     assert vendor.status == Vendor.Status.ACTIVE
     assert VendorMember.objects.get(vendor=vendor, user=owner).role == VendorMember.Role.OWNER
     assert owner.check_password(PASSWORD)
@@ -87,25 +81,19 @@ def test_creates_vendor_b_owner_course_enrollment_and_access_pass(
     assert ContentUnit.objects.get(lesson=lesson, type=ContentUnit.Type.TEXT)
     assert Module.objects.get(course=course)
 
-    enrollment = Enrollment.objects.get(user=learner, course=course)
-    assert enrollment.status == Enrollment.Status.ACTIVE
-    assert enrollment.vendor == vendor
-    assert AccessPass.objects.get(vendor=vendor, user=learner).status == AccessPass.Status.ACTIVE
-    assert f"E2E_VENDOR_B_ACCESS_LINK={settings.PUBLIC_APP_URL}/app/#access=" in output
+    assert not User.objects.filter(email__startswith="learner").exists()
+    assert "bootstrap complete" in output
     assert PASSWORD not in output
-    assert "learner-b@example.com" not in output.split("E2E_VENDOR_B_ACCESS_LINK=")[0]
+    assert "E2E_VENDOR_B_ACCESS_LINK" not in output
 
 
-def test_is_idempotent_and_does_not_print_a_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_idempotent_without_printing_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     configure_environment(monkeypatch)
     first = run_command()
-    link = first.split("E2E_VENDOR_B_ACCESS_LINK=", 1)[1].strip()
     ids = (
         Vendor.objects.get().id,
         User.objects.count(),
         Course.objects.get().id,
-        AccessPass.objects.get().id,
-        Enrollment.objects.get().id,
     )
 
     second = run_command()
@@ -114,26 +102,10 @@ def test_is_idempotent_and_does_not_print_a_new_token(monkeypatch: pytest.Monkey
         Vendor.objects.get().id,
         User.objects.count(),
         Course.objects.get().id,
-        AccessPass.objects.get().id,
-        Enrollment.objects.get().id,
     ) == ids
     assert "already exists" in second
-    assert link not in second
+    assert PASSWORD not in first
     assert PASSWORD not in second
-
-
-def test_adds_missing_enrollment_for_a_new_learner(monkeypatch: pytest.MonkeyPatch) -> None:
-    configure_environment(monkeypatch)
-    run_command()
-    existing_ids = set(AccessPass.objects.values_list("id", flat=True))
-
-    configure_environment(monkeypatch, E2E_VENDOR_B_LEARNER_EMAIL="another-learner@example.com")
-    output = run_command()
-
-    learner = User.objects.get(email="another-learner@example.com")
-    assert Enrollment.objects.get(user=learner).status == Enrollment.Status.ACTIVE
-    assert set(AccessPass.objects.values_list("id", flat=True)) - existing_ids
-    assert "E2E_VENDOR_B_ACCESS_LINK=" in output
 
 
 def test_rejects_password_mismatch_without_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,7 +119,7 @@ def test_rejects_password_mismatch_without_mutation(monkeypatch: pytest.MonkeyPa
 
     assert User.objects.get(email="owner-b@example.com").password == password_hash
     assert "different unusual pass 99124" not in str(caught.value)
-    assert not User.objects.filter(email="learner-b@example.com", is_active=False).exists()
+    assert User.objects.count() == 1
 
 
 def test_password_is_never_printed(monkeypatch: pytest.MonkeyPatch) -> None:

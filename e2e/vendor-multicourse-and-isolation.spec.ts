@@ -8,7 +8,7 @@ type MailpitMessage = {
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]
-  if (!value) throw new Error(`${name} is required; run bootstrap_e2e_owner first.`)
+  if (!value) throw new Error(`${name} is required; run the E2E bootstrap commands first.`)
   return value
 }
 
@@ -131,6 +131,18 @@ async function grantAccess(page: Page, learnerEmail: string, courseTitles: strin
   await expect(accessPanel.getByText(learnerEmail, { exact: true })).toHaveCount(courseTitles.length)
 }
 
+async function openLearnerAccess(page: Page, url: URL): Promise<void> {
+  await page.goto(url.toString())
+  await expect(
+    page.locator('h1').filter({ hasText: /Все курсы|Перенос входа/ }).first(),
+  ).toBeVisible({ timeout: 15_000 })
+  const transfer = page.getByRole('button', { name: 'Перенести вход на это устройство' })
+  if (await transfer.isVisible().catch(() => false)) {
+    await transfer.click()
+  }
+  await expect(page.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
+}
+
 async function learnerCourses(page: Page): Promise<Array<{ id: string; title: string }>> {
   return page.evaluate(async () => {
     const response = await fetch('/api/v1/learner/courses', { credentials: 'include' })
@@ -146,124 +158,114 @@ async function statusOf(page: Page, path: string): Promise<number> {
   }, path)
 }
 
-test('one access link opens every granted course of the vendor and tenants stay isolated', async ({
+async function assertCourseHidden(page: Page, courseId: string): Promise<void> {
+  expect(await statusOf(page, `/api/v1/learner/courses/${courseId}`)).toBe(404)
+  expect(await statusOf(page, `/api/v1/learner/courses/${courseId}/offline-manifest`)).toBe(404)
+  expect(await statusOf(page, `/api/v1/learner/courses/${courseId}/progress`)).toBe(404)
+  expect(await statusOf(
+    page,
+    `/api/v1/learner/courses/${courseId}/media/00000000-0000-0000-0000-000000000001/stream-url`,
+  )).toBe(404)
+  expect(await statusOf(
+    page,
+    `/api/v1/learner/courses/${courseId}/offline-media/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003`,
+  )).toBe(404)
+}
+
+test('one global learner keeps tenant isolation between two vendors', async ({
   browser,
   request,
 }) => {
-  test.setTimeout(240_000)
+  test.setTimeout(300_000)
   const ownerEmail = requiredEnvironment('E2E_OWNER_EMAIL')
   const ownerPassword = requiredEnvironment('E2E_OWNER_PASSWORD')
-  const vendorName = requiredEnvironment('E2E_VENDOR_NAME')
+  const vendorAName = requiredEnvironment('E2E_VENDOR_NAME')
+  const vendorBOwnerEmail = requiredEnvironment('E2E_VENDOR_B_OWNER_EMAIL')
+  const vendorBOwnerPassword = requiredEnvironment('E2E_VENDOR_B_OWNER_PASSWORD')
+  const vendorBName = requiredEnvironment('E2E_VENDOR_B_NAME')
+  const vendorBCourseTitle = requiredEnvironment('E2E_VENDOR_B_COURSE_TITLE')
   const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173'
   const mailpitURL = process.env.E2E_MAILPIT_URL ?? 'http://localhost:8025'
   const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  const learnerEmail = `learner-multi-${unique}@example.com`
-  const expectedSubject = `Доступ к курсам: ${vendorName}`
+  const learnerEmail = process.env.E2E_LEARNER_EMAIL ?? `learner-${unique}@example.com`
 
   const courseA1 = {
-    course: `E2E multi A1 ${unique}`,
+    course: `E2E isolation A1 ${unique}`,
     module: `E2E module A1 ${unique}`,
     lesson: `E2E lesson A1 ${unique}`,
     content: `E2E content A1 ${unique}`,
   }
   const courseA2 = {
-    course: `E2E multi A2 ${unique}`,
+    course: `E2E isolation A2 ${unique}`,
     module: `E2E module A2 ${unique}`,
     lesson: `E2E lesson A2 ${unique}`,
     content: `E2E content A2 ${unique}`,
   }
 
-  const vendorContext = await browser.newContext({ baseURL })
-  const vendor = await vendorContext.newPage()
-  await loginVendor(vendor, ownerEmail, ownerPassword, vendorName)
+  // Vendor A: two courses granted to the global learner.
+  const vendorAContext = await browser.newContext({ baseURL })
+  const vendorA = await vendorAContext.newPage()
+  await loginVendor(vendorA, ownerEmail, ownerPassword, vendorAName)
+  await createPublishedCourse(vendorA, courseA1)
+  await createPublishedCourse(vendorA, courseA2)
+  await grantAccess(vendorA, learnerEmail, [courseA1.course, courseA2.course])
 
-  await createPublishedCourse(vendor, courseA1)
-  await createPublishedCourse(vendor, courseA2)
+  const accessMessageA = await waitForMail(
+    request, mailpitURL, learnerEmail, `Доступ к курсам: ${vendorAName}`,
+  )
+  const emailedAccessA = await mailURL(request, mailpitURL, accessMessageA)
+  const accessA = new URL(`${baseURL}/app/#${emailedAccessA.hash.replace(/^#/, '')}`)
+  await vendorAContext.close()
 
-  await grantAccess(vendor, learnerEmail, [courseA1.course, courseA2.course])
+  // Vendor B (created by bootstrap_e2e_vendor): its course B1 granted to the same learner.
+  const vendorBContext = await browser.newContext({ baseURL })
+  const vendorB = await vendorBContext.newPage()
+  await loginVendor(vendorB, vendorBOwnerEmail, vendorBOwnerPassword, vendorBName)
+  await grantAccess(vendorB, learnerEmail, [vendorBCourseTitle])
 
-  const accessMessage = await waitForMail(request, mailpitURL, learnerEmail, expectedSubject)
-  const emailedURL = await mailURL(request, mailpitURL, accessMessage)
-  // The backend composes access links from PUBLIC_APP_URL (production in .env);
-  // the E2E app always runs at the local baseURL.
-  const accessURL = new URL(`${baseURL}/app/#${emailedURL.hash.replace(/^#/, '')}`)
-  await vendorContext.close()
+  const accessMessageB = await waitForMail(
+    request, mailpitURL, learnerEmail, `Доступ к курсам: ${vendorBName}`,
+  )
+  const emailedAccessB = await mailURL(request, mailpitURL, accessMessageB)
+  const accessB = new URL(`${baseURL}/app/#${emailedAccessB.hash.replace(/^#/, '')}`)
+  await vendorBContext.close()
 
-  // Criterion: one access link shows several granted courses of its vendor.
-  const learnerContext = await browser.newContext({ baseURL })
-  const learnerPage = await learnerContext.newPage()
-  await learnerPage.goto(accessURL.toString())
-  await expect(learnerPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
-  await expect(learnerPage.getByRole('button', { name: new RegExp(courseA1.course) })).toBeVisible()
-  await expect(learnerPage.getByRole('button', { name: new RegExp(courseA2.course) })).toBeVisible()
-  await learnerPage.getByRole('button', { name: new RegExp(courseA2.course) }).click()
-  await expect(learnerPage.getByRole('heading', { name: courseA2.course })).toBeVisible()
-  await expect(learnerPage.getByText(courseA2.content, { exact: true })).toBeVisible()
-
-  const vendorACourses = await learnerCourses(learnerPage)
+  // Tenant A session: one access link shows both of vendor A courses and no vendor B content.
+  const learnerAContext = await browser.newContext({ baseURL })
+  const learnerA = await learnerAContext.newPage()
+  await openLearnerAccess(learnerA, accessA)
+  await expect(learnerA.getByRole('button', { name: new RegExp(courseA1.course) })).toBeVisible()
+  await expect(learnerA.getByRole('button', { name: new RegExp(courseA2.course) })).toBeVisible()
+  await expect(learnerA.getByRole('button', { name: new RegExp(vendorBCourseTitle) })).toHaveCount(0)
+  const vendorACourses = await learnerCourses(learnerA)
   const courseA1Row = vendorACourses.find((course) => course.title === courseA1.course)
   const courseA2Row = vendorACourses.find((course) => course.title === courseA2.course)
   expect(courseA1Row).toBeTruthy()
   expect(courseA2Row).toBeTruthy()
   expect(vendorACourses.length).toBe(2)
 
-  // Tenant isolation: a learner of another vendor must not see or access this content.
-  const vendorBLink = process.env.E2E_VENDOR_B_ACCESS_LINK
-  const vendorBCourseTitle = process.env.E2E_VENDOR_B_COURSE_TITLE
-  test.skip(
-    !vendorBLink || !vendorBCourseTitle,
-    'E2E_VENDOR_B_ACCESS_LINK and E2E_VENDOR_B_COURSE_TITLE are required; run bootstrap_e2e_vendor first.',
-  )
-  const token = new URL(vendorBLink as string).hash.replace(/^#access=/, '')
-  const vendorBURL = `${baseURL}/app/#access=${token}`
+  // Tenant B session: shows vendor B course and no vendor A content.
+  const learnerBContext = await browser.newContext({ baseURL })
+  const learnerB = await learnerBContext.newPage()
+  await openLearnerAccess(learnerB, accessB)
+  await expect(learnerB.getByRole('button', { name: new RegExp(vendorBCourseTitle) })).toBeVisible()
+  await expect(learnerB.getByRole('button', { name: new RegExp(courseA1.course) })).toHaveCount(0)
+  await expect(learnerB.getByRole('button', { name: new RegExp(courseA2.course) })).toHaveCount(0)
+  const vendorBCourses = await learnerCourses(learnerB)
+  const courseB1Row = vendorBCourses.find((course) => course.title === vendorBCourseTitle)
+  expect(courseB1Row).toBeTruthy()
 
-  const vendorBContext = await browser.newContext({ baseURL })
-  const vendorBPage = await vendorBContext.newPage()
-  await vendorBPage.goto(vendorBURL)
-  await expect(
-    vendorBPage.locator('h1').filter({ hasText: /Все курсы|Перенос входа/ }).first(),
-  ).toBeVisible({ timeout: 15_000 })
-  const transferB = vendorBPage.getByRole('heading', { name: 'Перенос входа' })
-  if (await transferB.isVisible().catch(() => false)) {
-    await vendorBPage.getByRole('button', { name: 'Перенести вход на это устройство' }).click()
+  for (const foreignId of [courseA1Row?.id, courseA2Row?.id]) {
+    if (foreignId) {
+      expect(vendorBCourses.map((course) => course.id)).not.toContain(foreignId)
+      await assertCourseHidden(learnerB, foreignId)
+    }
   }
-  await expect(vendorBPage.getByRole('heading', { name: 'Все курсы' })).toBeVisible()
-  await expect(vendorBPage.getByRole('button', { name: new RegExp(vendorBCourseTitle as string) })).toBeVisible()
-  await expect(vendorBPage.getByRole('button', { name: new RegExp(courseA1.course) })).toHaveCount(0)
-  await expect(vendorBPage.getByRole('button', { name: new RegExp(courseA2.course) })).toHaveCount(0)
-
-  const vendorBCourses = await learnerCourses(vendorBPage)
-  const vendorBCourse = vendorBCourses.find((course) => course.title === vendorBCourseTitle)
-  expect(vendorBCourse).toBeTruthy()
-  expect(vendorBCourses.map((course) => course.id)).not.toContain(courseA1Row?.id)
-  expect(vendorBCourses.map((course) => course.id)).not.toContain(courseA2Row?.id)
-
-  for (const foreignCourseId of [courseA1Row?.id, courseA2Row?.id]) {
-    expect(await statusOf(vendorBPage, `/api/v1/learner/courses/${foreignCourseId}`)).toBe(404)
-    expect(await statusOf(vendorBPage, `/api/v1/learner/courses/${foreignCourseId}/offline-manifest`)).toBe(404)
-    expect(await statusOf(vendorBPage, `/api/v1/learner/courses/${foreignCourseId}/progress`)).toBe(404)
-    expect(await statusOf(
-      vendorBPage,
-      `/api/v1/learner/courses/${foreignCourseId}/media/00000000-0000-0000-0000-000000000001/stream-url`,
-    )).toBe(404)
-    expect(await statusOf(
-      vendorBPage,
-      `/api/v1/learner/courses/${foreignCourseId}/offline-media/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003`,
-    )).toBe(404)
+  if (courseB1Row?.id) {
+    expect(vendorACourses.map((course) => course.id)).not.toContain(courseB1Row.id)
+    await assertCourseHidden(learnerA, courseB1Row.id)
   }
 
-  const vendorAIds = vendorACourses.map((course) => course.id)
-  expect(vendorBCourses.map((course) => course.id)).not.toContain(
-    ...vendorAIds,
-  )
-  for (const foreignCourseId of [vendorBCourse?.id]) {
-    expect(await statusOf(learnerPage, `/api/v1/learner/courses/${foreignCourseId}`)).toBe(404)
-    expect(await statusOf(learnerPage, `/api/v1/learner/courses/${foreignCourseId}/offline-manifest`)).toBe(404)
-    expect(await statusOf(learnerPage, `/api/v1/learner/courses/${foreignCourseId}/progress`)).toBe(404)
-  }
-  const vendorAList = await learnerCourses(learnerPage)
-  expect(vendorAList.map((course) => course.id)).not.toContain(vendorBCourse?.id)
-
-  await learnerContext.close()
-  await vendorBContext.close()
+  await learnerAContext.close()
+  await learnerBContext.close()
 })

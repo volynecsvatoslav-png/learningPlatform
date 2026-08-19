@@ -1,3 +1,4 @@
+import secrets
 from unittest.mock import patch
 
 import pytest
@@ -446,6 +447,77 @@ def test_grant_reissue_and_revoke_access_store_only_hash(client: Client) -> None
     assert response.status_code == 200
     assert Enrollment.objects.get(pk=enrollment_id).status == Enrollment.Status.REVOKED
     assert AuditEvent.objects.filter(event_type="enrollment_revoke").count() == 1
+
+
+def test_repeated_grant_keeps_the_same_access_pass_and_the_original_link(
+    client: Client,
+) -> None:
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    owner = member("owner@example.com", vendor, VendorMember.Role.OWNER)
+
+    def published_course(slug: str) -> Course:
+        item = course(vendor, slug=slug)
+        module = Module.objects.create(course=item, title="Module", position=1)
+        lesson = Lesson.objects.create(module=module, title="Lesson", position=1, is_published=True)
+        ContentUnit.objects.create(
+            lesson=lesson,
+            type=ContentUnit.Type.TEXT,
+            position=1,
+            text_markdown=f"# {slug}",
+        )
+        publish_course(item)
+        return item
+
+    first_course = published_course("first")
+    second_course = published_course("second")
+    client.force_login(owner)
+
+    raw_token = secrets.token_urlsafe(32)
+    with patch(
+        "learner.services.new_access_token",
+        return_value=(raw_token, hash_access_token(raw_token)),
+    ):
+        first = json_post(
+            client,
+            "/api/v1/vendor/access/grant",
+            {
+                "vendor_id": str(vendor.id),
+                "learner_email": "learner@example.com",
+                "course_ids": [str(first_course.id)],
+            },
+        )
+    assert first.status_code == 201
+    assert first.json()["access_link"].endswith(f"/app/#access={raw_token}")
+
+    second = json_post(
+        client,
+        "/api/v1/vendor/access/grant",
+        {
+            "vendor_id": str(vendor.id),
+            "learner_email": "learner@example.com",
+            "course_ids": [str(second_course.id)],
+        },
+    )
+    assert second.status_code == 201
+    assert second.json()["access_link"] is None
+    assert len(mail.outbox) == 1
+
+    current_pass = AccessPass.objects.get()
+    assert AccessPass.objects.count() == 1
+    assert current_pass.token_hash == hash_access_token(raw_token)
+    assert Enrollment.objects.count() == 2
+
+    learner_client = Client()
+    activate(learner_client, raw_token)
+    courses = learner_client.get("/api/v1/learner/courses")
+    assert courses.status_code == 200
+    assert sorted(item["id"] for item in courses.json()) == sorted(
+        [str(first_course.id), str(second_course.id)]
+    )
+    for item in (first_course, second_course):
+        detail = learner_client.get(f"/api/v1/learner/courses/{item.id}")
+        assert detail.status_code == 200
+        assert detail.json()["viewer"]["email"] == "learner@example.com"
 
 
 def test_existing_user_cannot_be_taken_over_when_adding_member(client: Client) -> None:
