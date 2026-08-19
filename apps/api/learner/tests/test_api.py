@@ -24,6 +24,7 @@ from learner.models import (
     RecoveryChallenge,
     hash_access_token,
 )
+from learner.services import jwk_fingerprint
 from learner.tests.helpers import activate, make_device, request_exchange
 from learning.models import ContentUnit, Course, Lesson, Module
 from learning.services import publish_course
@@ -31,6 +32,12 @@ from media_assets.models import MediaAsset
 from vendors.models import Vendor
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _raise_auth_rate_limits(settings: object) -> None:
+    settings.ACCESS_AUTH_RATE_LIMIT = 100_000  # type: ignore[attr-defined]
+    settings.ACCESS_AUTH_RATE_WINDOW_SECONDS = 60  # type: ignore[attr-defined]
 
 
 def make_access() -> tuple[User, Course, Lesson, str]:
@@ -188,6 +195,164 @@ def test_same_installation_id_with_different_key_requires_transfer(client: Clien
     assert activated.id != old_device.id
     assert activated.installation_id == first_device[0]
     assert activated.public_key_fingerprint != old_device.public_key_fingerprint
+
+
+def test_same_key_with_new_installation_id_requires_transfer(client: Client) -> None:
+    _, _, _, token = make_access()
+    first_device = make_device()
+    activate(client, token, device=first_device)
+    old_device = Device.objects.get()
+    same_key_new_id = (uuid.uuid4(), first_device[1], first_device[2])
+
+    inspect = client.post(
+        "/api/v1/auth/access/inspect",
+        data={
+            "token": token,
+            "installation_id": str(same_key_new_id[0]),
+            "public_key_jwk": first_device[1],
+        },
+        content_type="application/json",
+    )
+    assert inspect.status_code == 200
+    assert inspect.json()["device_match"] is False
+    assert inspect.json()["transfer_required"] is True
+
+    response = request_exchange(client, token, device=same_key_new_id)
+    assert response.status_code == 409
+    assert response.json()["code"] == "DEVICE_TRANSFER_CONFIRMATION_REQUIRED"
+
+    confirmed = request_exchange(client, token, device=same_key_new_id, confirm_transfer=True)
+    assert confirmed.status_code == 200
+    assert AccessPass.objects.get().generation == 2
+    old_device.refresh_from_db()
+    assert old_device.revoked_at is not None
+    activated = Device.objects.get(revoked_at__isnull=True)
+    assert activated.id != old_device.id
+    assert activated.installation_id == same_key_new_id[0]
+    assert activated.public_key_fingerprint == jwk_fingerprint(first_device[1])
+
+
+def test_expired_challenge_is_rejected(client: Client, settings) -> None:  # type: ignore[no-untyped-def]
+    settings.DEVICE_CHALLENGE_TTL_SECONDS = -1
+    _, _, _, token = make_access()
+    installation_id, public_key_jwk, sign = make_device()
+
+    inspect = client.post(
+        "/api/v1/auth/access/inspect",
+        data={
+            "token": token,
+            "installation_id": str(installation_id),
+            "public_key_jwk": public_key_jwk,
+        },
+        content_type="application/json",
+    )
+    assert inspect.status_code == 200
+
+    exchange = client.post(
+        "/api/v1/auth/access/exchange",
+        data={
+            "token": token,
+            "installation_id": str(installation_id),
+            "public_key_jwk": public_key_jwk,
+            "challenge": inspect.json()["challenge"],
+            "signature": sign(inspect.json()["challenge"].encode("ascii")),
+        },
+        content_type="application/json",
+    )
+    assert exchange.status_code == 401
+    assert exchange.json()["code"] == "DEVICE_PROOF_INVALID"
+    assert Device.objects.count() == 0
+
+
+def test_challenge_is_scoped_to_its_access_pass(client: Client) -> None:
+    learner, _, _, token_a = make_access()
+    other_vendor = Vendor.objects.create(name="Other", slug="other")
+    token_b = secrets.token_urlsafe(32)
+    AccessPass.objects.create(
+        user=learner,
+        vendor=other_vendor,
+        token_hash=hash_access_token(token_b),
+        token_prefix=token_b[:12],
+    )
+    device_a = make_device()
+    device_b = make_device()
+    challenge_a = client.post(
+        "/api/v1/auth/access/inspect",
+        data={
+            "token": token_a,
+            "installation_id": str(device_a[0]),
+            "public_key_jwk": device_a[1],
+        },
+        content_type="application/json",
+    ).json()["challenge"]
+    challenge_b = client.post(
+        "/api/v1/auth/access/inspect",
+        data={
+            "token": token_b,
+            "installation_id": str(device_b[0]),
+            "public_key_jwk": device_b[1],
+        },
+        content_type="application/json",
+    ).json()["challenge"]
+    assert challenge_a != challenge_b
+
+    replay_under_b = client.post(
+        "/api/v1/auth/access/exchange",
+        data={
+            "token": token_b,
+            "installation_id": str(device_b[0]),
+            "public_key_jwk": device_b[1],
+            "challenge": challenge_a,
+            "signature": device_b[2](challenge_a.encode("ascii")),
+        },
+        content_type="application/json",
+    )
+    assert replay_under_b.status_code == 401
+    assert replay_under_b.json()["code"] == "DEVICE_PROOF_INVALID"
+
+    replay_under_a = client.post(
+        "/api/v1/auth/access/exchange",
+        data={
+            "token": token_a,
+            "installation_id": str(device_a[0]),
+            "public_key_jwk": device_a[1],
+            "challenge": challenge_b,
+            "signature": device_a[2](challenge_b.encode("ascii")),
+        },
+        content_type="application/json",
+    )
+    assert replay_under_a.status_code == 401
+    assert replay_under_a.json()["code"] == "DEVICE_PROOF_INVALID"
+    assert Device.objects.count() == 0
+
+
+def test_signature_over_different_challenge_is_rejected(client: Client) -> None:
+    _, _, _, token = make_access()
+    installation_id, public_key_jwk, sign = make_device()
+    challenge = client.post(
+        "/api/v1/auth/access/inspect",
+        data={
+            "token": token,
+            "installation_id": str(installation_id),
+            "public_key_jwk": public_key_jwk,
+        },
+        content_type="application/json",
+    ).json()["challenge"]
+
+    exchange = client.post(
+        "/api/v1/auth/access/exchange",
+        data={
+            "token": token,
+            "installation_id": str(installation_id),
+            "public_key_jwk": public_key_jwk,
+            "challenge": challenge,
+            "signature": sign((challenge + "tampered").encode("ascii")),
+        },
+        content_type="application/json",
+    )
+    assert exchange.status_code == 401
+    assert exchange.json()["code"] == "DEVICE_PROOF_INVALID"
+    assert Device.objects.count() == 0
 
 
 def test_reauthentication_as_transfer_does_not_reuse_a_stale_key(client: Client) -> None:
@@ -777,6 +942,100 @@ def test_offline_manifest_license_revision_and_revocation(client: Client) -> Non
         ).status_code
         == 404
     )
+
+
+def test_one_access_link_shows_all_granted_courses_of_the_vendor(client: Client) -> None:
+    learner = User.objects.create_user("learner@example.com")
+    vendor = Vendor.objects.create(name="Alpha", slug="alpha")
+    courses: list[Course] = []
+    for index in range(3):
+        course = Course.objects.create(
+            vendor=vendor, title=f"Course {index}", slug=f"course-{index}"
+        )
+        module = Module.objects.create(course=course, title="Module", position=1)
+        lesson = Lesson.objects.create(module=module, title="Lesson", position=1, is_published=True)
+        ContentUnit.objects.create(
+            lesson=lesson,
+            type=ContentUnit.Type.TEXT,
+            position=1,
+            text_markdown=f"# Course {index}",
+        )
+        course.status = Course.Status.PUBLISHED
+        publish_course(course)
+        courses.append(course)
+    token = secrets.token_urlsafe(32)
+    for course in courses:
+        Enrollment.objects.create(user=learner, vendor=vendor, course=course)
+    AccessPass.objects.create(
+        user=learner,
+        vendor=vendor,
+        token_hash=hash_access_token(token),
+        token_prefix=token[:12],
+    )
+
+    activate(client, token)
+    response = client.get("/api/v1/learner/courses")
+    assert response.status_code == 200
+    assert sorted(item["id"] for item in response.json()) == sorted(
+        str(course.id) for course in courses
+    )
+    for course in courses:
+        detail = client.get(f"/api/v1/learner/courses/{course.id}")
+        assert detail.status_code == 200
+        assert detail.json()["viewer"]["email"] == learner.email
+
+
+def test_offline_license_is_denied_after_transfer(client: Client) -> None:
+    learner, course, lesson, token = make_access()
+    asset = MediaAsset.objects.create(
+        vendor=course.vendor,
+        kind=MediaAsset.Kind.VIDEO,
+        status=MediaAsset.Status.READY,
+        bucket="private-bucket",
+        object_key="private/offline-video",
+        original_name="offline.mp4",
+        content_type="video/mp4",
+        size_bytes=10,
+        sha256="1" * 64,
+        created_by=learner,
+    )
+    lesson.content_units.all().delete()
+    ContentUnit.objects.create(
+        lesson=lesson,
+        type=ContentUnit.Type.VIDEO,
+        position=1,
+        media_asset=asset,
+        is_downloadable=True,
+    )
+    allowed_revision = publish_course(course)
+    manifest_url = f"/api/v1/learner/courses/{course.id}/offline-manifest"
+    license_url = f"/api/v1/learner/courses/{course.id}/offline-license"
+    license_payload = {"revision_id": str(allowed_revision.id)}
+
+    first = Client()
+    activate(first, token, device=make_device())
+    first_license = first.post(license_url, data=license_payload, content_type="application/json")
+    assert first_license.status_code == 200
+    first_claims = first_license.json()["claims"]
+    first_device = Device.objects.get(revoked_at__isnull=True)
+
+    second = Client()
+    activate(second, token, device=make_device(), confirm_transfer=True)
+    assert first_claims["device_id"] == str(first_device.id)
+    first_device.refresh_from_db()
+    assert first_device.revoked_at is not None
+
+    denied = first.post(license_url, data=license_payload, content_type="application/json")
+    assert denied.status_code == 401
+    assert denied.json()["code"] == "SESSION_REPLACED"
+    assert first.get(manifest_url).status_code == 401
+
+    renewed = second.post(license_url, data=license_payload, content_type="application/json")
+    assert renewed.status_code == 200
+    active_device = Device.objects.get(revoked_at__isnull=True)
+    assert renewed.json()["claims"]["device_id"] == str(active_device.id)
+    assert renewed.json()["claims"]["pass_generation"] == 2
+    assert active_device.id != first_device.id
 
 
 def test_shared_offline_license_fixture_matches_backend_public_key() -> None:

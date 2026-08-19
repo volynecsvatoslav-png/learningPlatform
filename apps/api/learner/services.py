@@ -346,9 +346,11 @@ def inspect_access(
         public_key_fingerprint=jwk_fingerprint(public_key_jwk),
         expires_at=timezone.now() + timedelta(seconds=settings.DEVICE_CHALLENGE_TTL_SECONDS),
     )
-    DeviceChallenge.objects.filter(access_pass=access_pass, used_at__isnull=True).exclude(
-        pk=challenge.pk
-    ).update(used_at=timezone.now())
+    DeviceChallenge.objects.filter(
+        access_pass=access_pass,
+        installation_id=installation_id,
+        used_at__isnull=True,
+    ).exclude(pk=challenge.pk).update(used_at=timezone.now())
     existing = (
         Device.objects.filter(access_pass=access_pass, revoked_at__isnull=True)
         .order_by("-last_seen_at")
