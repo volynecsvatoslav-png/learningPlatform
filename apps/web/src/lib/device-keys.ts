@@ -36,11 +36,19 @@ function openDb(): Promise<IDBDatabase> {
 async function loadCredentials(): Promise<StoredCredentials | null> {
   const db = await openDb()
   try {
-    return await new Promise((resolve, reject) => {
+    const stored = await new Promise<StoredCredentials | undefined>((resolve, reject) => {
       const request = db.transaction(STORE, 'readonly').objectStore(STORE).get(RECORD_ID)
-      request.onsuccess = () => { resolve((request.result as StoredCredentials | undefined) ?? null) }
-      request.onerror = () => { reject(request.error ?? new Error('DEVICE_KEYS_UNAVAILABLE')) }
+      request.onsuccess = () => { resolve(request.result as StoredCredentials | undefined) }
+      request.onerror = () => { reject(request.error instanceof Error ? request.error : new Error('DEVICE_KEYS_UNAVAILABLE')) }
     })
+    if (
+      stored
+      && stored.private_key instanceof CryptoKey
+      && !stored.private_key.extractable
+    ) {
+      return stored
+    }
+    return null
   } finally {
     db.close()
   }
@@ -52,7 +60,7 @@ async function saveCredentials(credentials: StoredCredentials): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const request = db.transaction(STORE, 'readwrite').objectStore(STORE).put(credentials)
       request.onsuccess = () => { resolve() }
-      request.onerror = () => { reject(request.error ?? new Error('DEVICE_KEYS_UNAVAILABLE')) }
+      request.onerror = () => { reject(request.error instanceof Error ? request.error : new Error('DEVICE_KEYS_UNAVAILABLE')) }
     })
   } finally {
     db.close()
@@ -61,15 +69,13 @@ async function saveCredentials(credentials: StoredCredentials): Promise<void> {
 
 async function generateCredentials(): Promise<StoredCredentials> {
   const algorithm: EcKeyGenParams = { name: 'ECDSA', namedCurve: 'P-256' }
-  const pair = await crypto.subtle.generateKey(algorithm, true, ['sign', 'verify'])
-  const privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey)
+  const pair = await crypto.subtle.generateKey(algorithm, false, ['sign', 'verify'])
   const publicKeyJwk = await crypto.subtle.exportKey('jwk', pair.publicKey)
-  const privateKey = await crypto.subtle.importKey('jwk', privateJwk, algorithm, false, ['sign'])
   const stored: StoredCredentials = {
     id: RECORD_ID,
     installation_id: crypto.randomUUID(),
     public_key_jwk: publicKeyJwk,
-    private_key: privateKey,
+    private_key: pair.privateKey,
   }
   await saveCredentials(stored)
   return stored

@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, learnerApi, resetCsrfTokens, type ContentUnit, type LearnerCourse, type LearnerProgress, type LearnerSnapshot } from '../lib/api'
 import { getAccessDevice, sha256Hex, type AccessDevice } from '../lib/device-keys'
 import { deleteAllOfflineCourses, deleteOfflineCourse, downloadOfflineCourse, formatBytes, getOfflinePackage, listOfflineCourses, offlineMediaUrl, readOfflineSnapshot, syncOfflineCourse, syncOfflineCourses, type OfflinePackage } from '../offline/offline-course'
 
 type EntranceToken = { kind: 'access' | 'recovery'; value: string }
-type SessionEndReason = 'replaced' | 'revoked' | 'expired'
+export type SessionEndReason = 'replaced' | 'revoked' | 'expired'
+
+function stopActiveMedia() {
+  window.dispatchEvent(new Event('lms-stop-media'))
+}
 
 function Markdown({ text }: { text: string }) {
   return <>{text.split('\n').map((line, index) => {
@@ -136,13 +140,65 @@ function PathAccessLogin({ onAuthenticated }: { onAuthenticated: () => void }) {
   return <main className="auth-layout"><section className="auth-card transfer-login"><p className="eyebrow">Установленное приложение</p><h1>Вход в кабинет ученика</h1><p className="muted">Откройте персональную ссылку из письма или ссылку восстановления доступа.</p><form onSubmit={(event) => { event.preventDefault(); void submitLink() }} autoComplete="off"><label>Полная ссылка из письма<input type="url" value={link} onChange={(event) => { setLink(event.target.value) }} autoComplete="off" spellCheck={false} /></label><button className="primary-action" type="submit" disabled={pending || !link.trim()}>Войти по ссылке</button></form>{error && <p className="form-error">{error}</p>}<details><summary>Восстановить доступ</summary>{!recoverySent ? <><p className="muted">Если приложение было удалено или устройство заменено, мы отправим ссылку восстановления на вашу почту.</p><form onSubmit={(event) => { event.preventDefault(); void requestRecovery() }} autoComplete="off"><label>Email ученика<input type="email" value={recoveryEmail} onChange={(event) => { setRecoveryEmail(event.target.value) }} autoComplete="email" required /></label><button className="text-button" type="submit" disabled={pending || !recoveryEmail.trim()}>Отправить ссылку восстановления</button></form>{recoveryError && <p className="form-error">{recoveryError}</p>}</> : <p className="form-success">Письмо отправлено. Если доступ существует, откройте ссылку из письма.</p>}</details></section></main>
 }
 
-function VideoMedia({ src, watermark }: { src: string; watermark: string }) {
+function useStopMediaListener<T extends HTMLMediaElement>(ref: RefObject<T | null>) {
+  useEffect(() => {
+    const stop = () => { ref.current?.pause() }
+    window.addEventListener('lms-stop-media', stop)
+    return () => { window.removeEventListener('lms-stop-media', stop) }
+  }, [ref])
+}
+
+function usePlaybackGate<T extends HTMLMediaElement>(options: { online: boolean; offlineAssetAvailable: boolean; onTerminated: (reason: SessionEndReason) => void }) {
+  const mediaRef = useRef<T | null>(null)
+  const [gateError, setGateError] = useState('')
+  const verified = useRef(false)
+  const verifying = useRef(false)
+  useStopMediaListener(mediaRef)
+  const handlePlay = useCallback(() => {
+    void (async () => {
+      const media = mediaRef.current
+      if (!media || verified.current || verifying.current) return
+      if (options.offlineAssetAvailable && !navigator.onLine) {
+        verified.current = true
+        return
+      }
+      media.pause()
+      verifying.current = true
+      setGateError('')
+      try {
+        await learnerApi.heartbeat()
+        verified.current = true
+        void media.play().catch(() => undefined)
+      } catch (reason) {
+        if (reason instanceof ApiError && reason.status === 401) {
+          const endReason = sessionEndReason(reason.code)
+          if (endReason) {
+            options.onTerminated(endReason)
+            return
+          }
+        }
+        setGateError('Не удалось подтвердить доступ. Проверьте соединение и попробуйте ещё раз.')
+      } finally {
+        verifying.current = false
+      }
+    })()
+  }, [options])
+  return { mediaRef, gateError, handlePlay }
+}
+
+function VideoMedia({ src, watermark, online, offlineAssetAvailable, onTerminated }: { src: string; watermark: string; online: boolean; offlineAssetAvailable: boolean; onTerminated: (reason: SessionEndReason) => void }) {
   const [position, setPosition] = useState(0)
+  const { mediaRef, gateError, handlePlay } = usePlaybackGate<HTMLVideoElement>({ online, offlineAssetAvailable, onTerminated })
   useEffect(() => {
     const interval = window.setInterval(() => { setPosition((value) => (value + 1) % 4) }, 8000)
     return () => { window.clearInterval(interval) }
   }, [])
-  return <div className="video-frame"><video controls controlsList="nodownload noremoteplayback" disablePictureInPicture onContextMenu={(event) => { event.preventDefault() }} src={src} /><span className={`video-watermark watermark-position-${String(position)}`}>{watermark}</span></div>
+  return <div className="video-frame"><video controls controlsList="nodownload noremoteplayback" disablePictureInPicture onContextMenu={(event) => { event.preventDefault() }} onPlay={handlePlay} ref={mediaRef} src={src} /><span className={`video-watermark watermark-position-${String(position)}`}>{watermark}</span>{gateError && <p className="form-error">{gateError}</p>}</div>
+}
+
+function AudioMedia({ src, online, offlineAssetAvailable, onTerminated }: { src: string; online: boolean; offlineAssetAvailable: boolean; onTerminated: (reason: SessionEndReason) => void }) {
+  const { mediaRef, gateError, handlePlay } = usePlaybackGate<HTMLAudioElement>({ online, offlineAssetAvailable, onTerminated })
+  return <><audio controls controlsList="nodownload noremoteplayback" onContextMenu={(event) => { event.preventDefault() }} onPlay={handlePlay} ref={mediaRef} src={src} />{gateError && <p className="form-error">{gateError}</p>}</>
 }
 
 function useOnlineStatus() {
@@ -178,13 +234,8 @@ function SessionEnded({ reason, onBack, onLogout }: { reason: SessionEndReason; 
   return <main className="state-screen"><h1>{content.title}</h1><p>{content.text}</p><div className="state-actions">{reason !== 'replaced' && <button className="primary-action" onClick={onBack}>Вернуться к курсам</button>}<button className="text-button" onClick={onLogout}>Выйти</button></div></main>
 }
 
-export function MediaUnit({ courseId, unit, watermark, offlinePackage, offlineAssetAvailable, snapshotLoadedOffline }: { courseId: string; unit: ContentUnit; watermark: string; offlinePackage?: OfflinePackage; offlineAssetAvailable: boolean; snapshotLoadedOffline: boolean }) {
+export function MediaUnit({ courseId, unit, watermark, offlinePackage, offlineAssetAvailable, snapshotLoadedOffline, online, onTerminated }: { courseId: string; unit: ContentUnit; watermark: string; offlinePackage?: OfflinePackage; offlineAssetAvailable: boolean; snapshotLoadedOffline: boolean; online: boolean; onTerminated: (reason: SessionEndReason) => void }) {
   const media = useQuery({ queryKey: ['learner-media', courseId, unit.media_asset_id], queryFn: () => learnerApi.streamUrl(courseId, unit.media_asset_id ?? ''), enabled: Boolean(unit.media_asset_id), networkMode: 'always', retry: false })
-  useEffect(() => {
-    if ((unit.type === 'audio' || unit.type === 'video') && navigator.onLine) {
-      learnerApi.heartbeat().catch(() => undefined)
-    }
-  }, [unit.type, unit.media_asset_id])
   const offlineSource = offlineAssetAvailable ? offlineMediaUrl(courseId, unit.media_asset_id ?? '') : undefined
   const source = media.data?.url ?? offlineSource
   if (!media.data && offlineSource && offlinePackage && offlinePackage.licenseClaims.expires_at * 1000 <= Date.now()) return <p className="form-error">Подключитесь к интернету для продления офлайн-доступа.</p>
@@ -192,8 +243,8 @@ export function MediaUnit({ courseId, unit, watermark, offlinePackage, offlineAs
   if (!source && snapshotLoadedOffline && !offlineAssetAvailable) return <p className="form-error">Этот материал доступен только при подключении к интернету</p>
   if (!source) return <p className="form-error">Медиа недоступно.</p>
   if (unit.type === 'image') return <img className="lesson-image" src={source} alt={unit.title} />
-  if (unit.type === 'audio') return <audio controls controlsList="nodownload noremoteplayback" onContextMenu={(event) => { event.preventDefault() }} src={source} />
-  return <VideoMedia src={source} watermark={watermark} />
+  if (unit.type === 'audio') return <AudioMedia src={source} online={online} offlineAssetAvailable={Boolean(offlineSource)} onTerminated={onTerminated} />
+  return <VideoMedia src={source} watermark={watermark} online={online} offlineAssetAvailable={Boolean(offlineSource)} onTerminated={onTerminated} />
 }
 
 function continuationLesson(snapshot: LearnerSnapshot, progress: LearnerProgress[]): string | null {
@@ -214,7 +265,7 @@ function sessionEndReason(code: string | undefined): SessionEndReason | null {
   return null
 }
 
-function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void }) {
+function CourseView({ courseId, onBack, onSessionTerminated }: { courseId: string; onBack: () => void; onSessionTerminated: (reason: SessionEndReason) => void }) {
   const [lessonId, setLessonId] = useState<string | null>(null)
   const [recordedLessonId, setRecordedLessonId] = useState<string | null>(null)
   const [offlinePackage, setOfflinePackage] = useState<OfflinePackage>()
@@ -233,6 +284,13 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
     try { return await learnerApi.progress(courseId) } catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; if (await getOfflinePackage(courseId)) return []; throw error instanceof Error ? error : new Error('Не удалось загрузить прогресс.') }
   } })
   const offlineInfo = useQuery({ queryKey: ['learner-offline-manifest', courseId], queryFn: () => learnerApi.offlineManifest(courseId), enabled: online && Boolean(course.data?.snapshot) })
+  useEffect(() => {
+    const error = course.error ?? progress.error
+    if (error instanceof ApiError) {
+      const reason = sessionEndReason(error.code)
+      if (reason) onSessionTerminated(reason)
+    }
+  }, [course.error, progress.error, onSessionTerminated])
   const save = useMutation({ mutationFn: ({ id, percent }: { id: string; percent: number }) => learnerApi.saveProgress(courseId, id, percent), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['learner-progress', courseId] }) } })
   const snapshot = course.data?.snapshot
   const activeLessonId = snapshot && progress.data ? lessonId ?? continuationLesson(snapshot, progress.data) : null
@@ -253,11 +311,18 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
       save.mutate({ id: lesson.id, percent: Math.max(1, lessonProgress?.percent ?? 0) })
     }
   }, [lesson, lessonProgress, online, recordedLessonId, save])
+  useEffect(() => {
+    const error = course.error ?? progress.error
+    if (error instanceof ApiError) {
+      const reason = sessionEndReason(error.code)
+      if (reason) onSessionTerminated(reason)
+    }
+  }, [course.error, progress.error, onSessionTerminated])
   if (course.isLoading || progress.isLoading) return <main className="loading-screen">Загрузка курса...</main>
   const requestError = course.error ?? progress.error
   if (requestError instanceof ApiError) {
     const reason = sessionEndReason(requestError.code)
-    if (reason) return <SessionEnded reason={reason} onBack={onBack} onLogout={() => { window.dispatchEvent(new Event('lms-logout-request')) }} />
+    if (reason) return <main className="loading-screen">Проверяем доступ...</main>
   }
   if (course.isError || progress.isError || !course.data?.snapshot || !progress.data) return <main className="state-screen"><h1>Курс недоступен</h1><p>Доступ отозван или курс больше не опубликован.</p><button className="text-button" onClick={onBack}>Вернуться к курсам</button></main>
   const currentSnapshot = course.data.snapshot
@@ -275,7 +340,7 @@ function CourseView({ courseId, onBack }: { courseId: string; onBack: () => void
       .finally(() => { setIsDownloading(false); downloadController.current = null })
   }
   const removeDownload = () => { void deleteOfflineCourse(courseId).then(() => { setOfflinePackage(undefined); setDownloadProgress(0); setDownloadSize(0) }) }
-  return <main className="learner-shell"><header className="workspace-header"><div><button className="text-button back-button" onClick={onBack}>← Все курсы</button><p className="eyebrow">Ваш учебный маршрут</p><h1>{currentSnapshot.title}</h1></div></header><div className="offline-manager">{!offlinePackageLoaded && <span>Проверяем загрузки…</span>}{offlinePackageLoaded && offlineAllowed && !offlinePackage && !isDownloading && <><button className="primary-action" disabled={!online} onClick={startDownload}>Скачать курс</button>{typeof offlineInfo.data?.total_size === 'number' && <span>{formatBytes(offlineInfo.data.total_size)}</span>}</>}{isDownloading && <><p>Загрузка: {downloadProgress}% · {formatBytes(downloadSize)}</p><progress max="100" value={downloadProgress}>{downloadProgress}%</progress><button onClick={() => { downloadController.current?.abort() }}>Отменить загрузку</button></>}{offlinePackage && <><strong>Доступно офлайн</strong><span>{formatBytes(offlinePackage.totalSize)}</span>{offlinePackage.updateAvailable && <><span className="status">Доступно обновление</span><button disabled={!online || isDownloading} onClick={startDownload}>Обновить скачанный курс</button></>}<button onClick={removeDownload}>Удалить с устройства</button></>}{downloadError && <p className="form-error">{downloadError}</p>}</div><div className="learner-grid"><nav className="lesson-nav"><p className="eyebrow">Содержание</p>{currentSnapshot.modules.map((module) => <div key={module.id}><h3>{module.title}</h3>{module.lessons.map((item) => { const done = progress.data.find((row) => row.lesson_id === item.id)?.status === 'completed'; return <button className={item.id === lesson?.id ? 'lesson-link active' : 'lesson-link'} key={item.id} onClick={() => { setLessonId(item.id) }}><span>{done ? '✓ ' : ''}{item.title}</span></button> })}</div>)}</nav><article className="lesson-view"><p className="eyebrow">Урок</p><h2>{lesson?.title ?? 'Выберите урок'}</h2><p className="muted">{lesson?.description}<br /></p>{lesson && <div className="lesson-content">{lesson.content_units.map((unit) => unit.type === 'text' ? <Markdown key={unit.id} text={unit.text_markdown ?? ''} /> : <MediaUnit key={unit.id} courseId={courseId} unit={unit} watermark={watermark} offlinePackage={offlinePackage} offlineAssetAvailable={offlineAssetIds.has(unit.media_asset_id ?? '')} snapshotLoadedOffline={snapshotLoadedOffline} />)}</div>}</article></div><footer className="learner-footer"><button className="text-button" onClick={() => { window.dispatchEvent(new Event('lms-logout-request')) }}>Выйти</button></footer></main>
+  return <main className="learner-shell"><header className="workspace-header"><div><button className="text-button back-button" onClick={onBack}>← Все курсы</button><p className="eyebrow">Ваш учебный маршрут</p><h1>{currentSnapshot.title}</h1></div></header><div className="offline-manager">{!offlinePackageLoaded && <span>Проверяем загрузки…</span>}{offlinePackageLoaded && offlineAllowed && !offlinePackage && !isDownloading && <><button className="primary-action" disabled={!online} onClick={startDownload}>Скачать курс</button>{typeof offlineInfo.data?.total_size === 'number' && <span>{formatBytes(offlineInfo.data.total_size)}</span>}</>}{isDownloading && <><p>Загрузка: {downloadProgress}% · {formatBytes(downloadSize)}</p><progress max="100" value={downloadProgress}>{downloadProgress}%</progress><button onClick={() => { downloadController.current?.abort() }}>Отменить загрузку</button></>}{offlinePackage && <><strong>Доступно офлайн</strong><span>{formatBytes(offlinePackage.totalSize)}</span>{offlinePackage.updateAvailable && <><span className="status">Доступно обновление</span><button disabled={!online || isDownloading} onClick={startDownload}>Обновить скачанный курс</button></>}<button onClick={removeDownload}>Удалить с устройства</button></>}{downloadError && <p className="form-error">{downloadError}</p>}</div><div className="learner-grid"><nav className="lesson-nav"><p className="eyebrow">Содержание</p>{currentSnapshot.modules.map((module) => <div key={module.id}><h3>{module.title}</h3>{module.lessons.map((item) => { const done = progress.data.find((row) => row.lesson_id === item.id)?.status === 'completed'; return <button className={item.id === lesson?.id ? 'lesson-link active' : 'lesson-link'} key={item.id} onClick={() => { setLessonId(item.id) }}><span>{done ? '✓ ' : ''}{item.title}</span></button> })}</div>)}</nav><article className="lesson-view"><p className="eyebrow">Урок</p><h2>{lesson?.title ?? 'Выберите урок'}</h2><p className="muted">{lesson?.description}<br /></p>{lesson && <div className="lesson-content">{lesson.content_units.map((unit) => unit.type === 'text' ? <Markdown key={unit.id} text={unit.text_markdown ?? ''} /> : <MediaUnit key={unit.id} courseId={courseId} unit={unit} watermark={watermark} offlinePackage={offlinePackage} offlineAssetAvailable={offlineAssetIds.has(unit.media_asset_id ?? '')} snapshotLoadedOffline={snapshotLoadedOffline} online={online} onTerminated={onSessionTerminated} />)}</div>}</article></div><footer className="learner-footer"><button className="text-button" onClick={() => { window.dispatchEvent(new Event('lms-logout-request')) }}>Выйти</button></footer></main>
 }
 
 function CourseCover({ course }: { course: LearnerCourse }) {
@@ -299,6 +364,8 @@ export function LearnerPage() {
   const queryClient = useQueryClient()
   const serviceWorkerReady = useServiceWorkerReady()
   const channel = useRef<BroadcastChannel | null>(null)
+  const sessionTerminated = useRef(false)
+  const broadcastReceived = useRef(false)
   useEffect(() => {
     if (/^\/app\/access\//.test(window.location.pathname)) {
       window.history.replaceState({}, '', '/app/')
@@ -327,11 +394,33 @@ export function LearnerPage() {
     queryClient.clear()
     window.history.replaceState({}, '', '/app/')
     if (purgeOffline) void deleteAllOfflineCourses().catch(() => undefined)
+    sessionTerminated.current = false
+    broadcastReceived.current = false
     setEntrance(null)
     setSessionEnd(null)
     setSessionEndDismissed(false)
     setCourseId(nextCourseId)
     setAuthEpoch((value) => value + 1)
+  }, [queryClient])
+  const terminateSession = useCallback((reason: SessionEndReason, purgeOffline: boolean) => {
+    if (sessionTerminated.current) return
+    sessionTerminated.current = true
+    stopActiveMedia()
+    queryClient.clear()
+    window.history.replaceState({}, '', '/app/')
+    if (purgeOffline) void deleteAllOfflineCourses().catch(() => undefined)
+    setEntrance(null)
+    setCourseId(null)
+    setSessionEnd(reason)
+    setSessionEndDismissed(false)
+    setAuthEpoch((value) => value + 1)
+    if (reason === 'replaced' && !broadcastReceived.current) {
+      try {
+        channel.current?.postMessage({ type: 'session-replaced' })
+      } catch {
+        // BroadcastChannel may be unavailable in some browsers.
+      }
+    }
   }, [queryClient])
   const existingCourses = useQuery({ queryKey: ['learner-courses', authEpoch], networkMode: 'always', queryFn: async () => {
     try { return await learnerApi.courses() } catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; const local = await listOfflineCourses(); if (local.length) return local; throw error instanceof Error ? error : new Error('Не удалось загрузить курсы.') }
@@ -341,21 +430,27 @@ export function LearnerPage() {
   const logout = useMutation({ mutationFn: async () => { try { await learnerApi.logout().catch(() => undefined) } finally { await deleteAllOfflineCourses().catch(() => undefined) } }, onSuccess: () => {
     queryClient.clear()
     window.history.replaceState({}, '', '/app/')
+    sessionTerminated.current = false
+    broadcastReceived.current = false
     setEntrance(null)
     setSessionEnd(null)
     setCourseId(null)
     setAuthEpoch((value) => value + 1)
   } })
   useEffect(() => {
+    const error = existingCourses.error
+    if (error instanceof ApiError && error.status === 401) {
+      const reason = sessionEndReason(error.code)
+      if (reason && !sessionEnd) terminateSession(reason, true)
+    }
+  }, [existingCourses.error, sessionEnd, terminateSession])
+  useEffect(() => {
     const error = heartbeat.error
     if (error instanceof ApiError && error.status === 401 && !sessionEndDismissed) {
       const reason = sessionEndReason(error.code)
-      if (reason) {
-        void deleteAllOfflineCourses().catch(() => undefined)
-        setSessionEnd(reason)
-      }
+      if (reason) terminateSession(reason, true)
     }
-  }, [heartbeat.error, sessionEndDismissed])
+  }, [heartbeat.error, sessionEndDismissed, terminateSession])
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return
     const broadcast = new BroadcastChannel('lms-access-logout')
@@ -363,9 +458,13 @@ export function LearnerPage() {
     broadcast.onmessage = (event) => {
       const data = event.data as { type?: unknown } | null
       if (data?.type === 'logout') completeSessionChange(null, false)
+      if (data?.type === 'session-replaced') {
+        broadcastReceived.current = true
+        terminateSession('replaced', true)
+      }
     }
     return () => { broadcast.close(); channel.current = null }
-  }, [completeSessionChange])
+  }, [completeSessionChange, terminateSession])
   const logoutAll = () => {
     setSessionEndDismissed(true)
     try {
@@ -397,7 +496,7 @@ export function LearnerPage() {
     setCourseId(null)
     setAuthEpoch((value) => value + 1)
   }} onLogout={logoutAll} />
-  if (courseId) return <>{serviceWorkerStatus}<CourseView courseId={courseId} onBack={() => { setCourseId(null) }} /></>
+  if (courseId) return <>{serviceWorkerStatus}<CourseView courseId={courseId} onBack={() => { setCourseId(null) }} onSessionTerminated={(reason) => { terminateSession(reason, true) }} /></>
   if (existingCourses.isLoading) return <main className="loading-screen">Проверяем сессию...</main>
   if (existingCourses.isError) {
     const reason = sessionEndReason(existingCourses.error instanceof ApiError ? existingCourses.error.code : undefined)

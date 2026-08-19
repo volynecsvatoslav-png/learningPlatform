@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { LearnerPage, MediaUnit } from './learner-page'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { LearnerPage, MediaUnit, type SessionEndReason } from './learner-page'
 import type { OfflinePackage } from '../offline/types'
 
 function renderPage(path = '/app/') {
@@ -33,6 +33,49 @@ function setStandalone(value: boolean) {
     dispatchEvent: vi.fn(() => true),
   })))
   Object.defineProperty(navigator, 'standalone', { configurable: true, value })
+}
+
+class FakeBroadcastChannel {
+  static instances: FakeBroadcastChannel[] = []
+  name: string
+  posted: unknown[] = []
+  onmessage: ((event: MessageEvent) => void) | null = null
+
+  constructor(name: string) {
+    this.name = name
+    FakeBroadcastChannel.instances.push(this)
+  }
+
+  postMessage(data: unknown) {
+    this.posted.push(data)
+  }
+
+  close() {}
+
+  static deliver(instance: FakeBroadcastChannel, type: string) {
+    instance.onmessage?.({ data: { type } } as MessageEvent)
+  }
+
+  static delivered(type: string, from?: FakeBroadcastChannel) {
+    for (const instance of FakeBroadcastChannel.instances) {
+      if (instance !== from) FakeBroadcastChannel.deliver(instance, type)
+    }
+  }
+
+  static reset() {
+    FakeBroadcastChannel.instances = []
+  }
+}
+
+function stubBroadcastChannel() {
+  vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+  FakeBroadcastChannel.reset()
+}
+
+function renderMediaUnit(fetchMock: typeof fetch, onTerminated: (reason: SessionEndReason) => void = () => undefined) {
+  vi.stubGlobal('fetch', fetchMock)
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={queryClient}><MediaUnit courseId="course-1" unit={{ id: 'unit-video', type: 'video', title: 'Protected video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: false }} watermark="learner@example.com" offlineAssetAvailable={false} snapshotLoadedOffline={false} online onTerminated={onTerminated} /></QueryClientProvider>)
 }
 
 const courses = [
@@ -394,8 +437,171 @@ describe('LearnerPage', () => {
     Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => response({ code: 'NETWORK_UNAVAILABLE' }, 503)))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const view = render(<QueryClientProvider client={queryClient}><MediaUnit courseId="course-1" unit={{ id: 'unit-video', type: 'video', title: 'Video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: true }} watermark="learner@example.com" offlinePackage={offlinePackage} offlineAssetAvailable snapshotLoadedOffline={false} /></QueryClientProvider>)
+    const view = render(<QueryClientProvider client={queryClient}><MediaUnit courseId="course-1" unit={{ id: 'unit-video', type: 'video', title: 'Video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: true }} watermark="learner@example.com" offlinePackage={offlinePackage} offlineAssetAvailable snapshotLoadedOffline={false} online onTerminated={() => undefined} /></QueryClientProvider>)
 
     await waitFor(() => { expect(view.container.querySelector('video')).toHaveAttribute('src', '/offline-media/course-1/asset-1') })
+  })
+
+  it('runs a heartbeat before continuing playback when the play button is pressed online', async () => {
+    const requests: string[] = []
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      requests.push(url)
+      if (url.endsWith('/stream-url')) return response({ url: '/api/v1/learner/media' })
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ generation: 1 })
+      return response({ code: 'NOT_FOUND' }, 404)
+    })
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
+    const view = renderMediaUnit(fetchMock)
+
+    const video = await waitFor(() => {
+      const element = view.container.querySelector('video')
+      if (!element) throw new Error('no video')
+      return element
+    })
+    const playSpy = vi.spyOn(video, 'play').mockResolvedValue()
+    fireEvent.play(video)
+
+    await waitFor(() => { expect(playSpy).toHaveBeenCalled() })
+    expect(requests).toContain('/api/v1/auth/heartbeat')
+  })
+
+  it('pauses and terminates the session when the playback heartbeat is rejected with SESSION_REPLACED', async () => {
+    const onTerminated = vi.fn()
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/stream-url')) return response({ url: '/api/v1/learner/media' })
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ code: 'SESSION_REPLACED' }, 401)
+      return response({ code: 'NOT_FOUND' }, 404)
+    })
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
+    const view = renderMediaUnit(fetchMock, onTerminated)
+
+    const video = await waitFor(() => {
+      const element = view.container.querySelector('video')
+      if (!element) throw new Error('no video')
+      return element
+    })
+    const pauseSpy = vi.spyOn(video, 'pause').mockReturnValue()
+    fireEvent.play(video)
+
+    await waitFor(() => { expect(onTerminated).toHaveBeenCalledWith('replaced') })
+    expect(pauseSpy).toHaveBeenCalled()
+    expect(view.queryByText(/Не удалось подтвердить доступ/)).not.toBeInTheDocument()
+  })
+
+  it('shows the heartbeat network error for playback without terminating the session', async () => {
+    const onTerminated = vi.fn()
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/stream-url')) return response({ url: '/api/v1/learner/media' })
+      if (url.endsWith('/api/v1/auth/heartbeat')) return Promise.reject(new TypeError('Failed to fetch'))
+      return response({ code: 'NOT_FOUND' }, 404)
+    })
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
+    const view = renderMediaUnit(fetchMock, onTerminated)
+
+    const video = await waitFor(() => {
+      const element = view.container.querySelector('video')
+      if (!element) throw new Error('no video')
+      return element
+    })
+    fireEvent.play(video)
+
+    expect(await screen.findByText(/Не удалось подтвердить доступ/)).toBeInTheDocument()
+    expect(onTerminated).not.toHaveBeenCalled()
+  })
+
+  it('skips the heartbeat gate for offline playback', async () => {
+    const requests: string[] = []
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      requests.push(url)
+      if (url.endsWith('/stream-url')) return response({ code: 'NETWORK_UNAVAILABLE' }, 503)
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ generation: 1 })
+      return response({ code: 'NOT_FOUND' }, 404)
+    })
+    const offlinePackage: OfflinePackage = {
+      courseId: 'course-1', packageId: 'package-1', revisionId: 'revision-1', revision: 1,
+      title: 'First course', shortDescription: '', licenseToken: 'fixture',
+      licenseClaims: { license_id: 'license', learner_id: 'learner-1', course_id: 'course-1', revision_id: 'revision-1', revision: 1, access_pass_id: 'pass-1', pass_generation: 1, device_id: 'device', issued_at: 1, expires_at: 4102444800, iat: 1, exp: 4102444800 },
+      learnerId: 'learner-1', deviceId: 'device', accessPassId: 'pass-1', passGeneration: 1, snapshotIv: new ArrayBuffer(12), snapshotCiphertext: new ArrayBuffer(1),
+      assets: [{ id: 'asset-1', content_type: 'video/mp4', size_bytes: 6, sha256: '0'.repeat(64), chunk_size: 4, chunk_count: 2 }],
+      totalSize: 6, storageKind: 'idb', status: 'ready', updateAvailable: false, createdAt: Date.now(),
+    }
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false })
+    vi.stubGlobal('fetch', fetchMock)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(<QueryClientProvider client={queryClient}><MediaUnit courseId="course-1" unit={{ id: 'unit-video', type: 'video', title: 'Video', position: 1, text_markdown: null, media_asset_id: 'asset-1', is_downloadable: true }} watermark="learner@example.com" offlinePackage={offlinePackage} offlineAssetAvailable snapshotLoadedOffline={false} online={false} onTerminated={() => undefined} /></QueryClientProvider>)
+
+    const video = await waitFor(() => {
+      const element = view.container.querySelector('video')
+      if (!element) throw new Error('no video')
+      return element
+    })
+    fireEvent.play(video)
+
+    expect(requests.some((url) => url.endsWith('/api/v1/auth/heartbeat'))).toBe(false)
+    expect(view.queryByText(/Не удалось подтвердить доступ/)).not.toBeInTheDocument()
+  })
+
+  it('ends the session in the current tab and announces a session-replaced broadcast on heartbeat rejection', async () => {
+    stubBroadcastChannel()
+    const stopSpy = vi.fn()
+    window.addEventListener('lms-stop-media', stopSpy)
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response(courses)
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ code: 'SESSION_REPLACED' }, 401)
+      if (url.includes('/progress')) return response([])
+      return response(snapshot)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Сессия завершена' })).toBeInTheDocument()
+    expect(stopSpy).toHaveBeenCalled()
+    const posted = FakeBroadcastChannel.instances.flatMap((instance) => instance.posted)
+    expect(posted).toEqual([{ type: 'session-replaced' }])
+  })
+
+  it('handles a received session-replaced broadcast without re-sending it', async () => {
+    stubBroadcastChannel()
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response(courses)
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ generation: 1 })
+      if (url.includes('/progress')) return response([])
+      return response(snapshot)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+    await screen.findByRole('heading', { name: 'Все курсы' })
+
+    const channel = FakeBroadcastChannel.instances[0]
+    if (!channel) throw new Error('no broadcast channel')
+    act(() => { FakeBroadcastChannel.deliver(channel, 'session-replaced') })
+
+    await waitFor(() => { expect(screen.queryByRole('heading', { name: 'Сессия завершена' })).toBeInTheDocument() })
+    expect(channel.posted).toEqual([])
+    expect(FakeBroadcastChannel.instances.filter((instance) => instance.posted.some((item) => (item as { type?: string }).type === 'session-replaced'))).toHaveLength(0)
+  })
+
+  it('ends the session in other tabs when a broadcast is delivered to them', async () => {
+    stubBroadcastChannel()
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/learner/courses')) return response(courses)
+      if (url.endsWith('/api/v1/auth/heartbeat')) return response({ generation: 1 })
+      if (url.includes('/progress')) return response([])
+      return response(snapshot)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage()
+    await screen.findByRole('heading', { name: 'Все курсы' })
+
+    act(() => { FakeBroadcastChannel.delivered('session-replaced') })
+    expect(await screen.findByRole('heading', { name: 'Сессия завершена' })).toBeInTheDocument()
+    expect(FakeBroadcastChannel.instances.every((instance) => instance.posted.length === 0)).toBe(true)
   })
 })
